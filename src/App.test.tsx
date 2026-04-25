@@ -1,269 +1,101 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor, act } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
 
-describe('App component', () => {
-  beforeEach(() => {
-    // Reset chrome storage mock
-    vi.mocked(chrome.storage.local.get).mockImplementation((keys, callback) => {
-      callback({
-        apiKey: 'test-api-key',
-        baseUrl: 'https://test.api.com',
-        model: 'test-model',
-        chatHistory: []
-      });
-    });
+vi.mock('./providers/index', () => ({
+  selectProvider: vi.fn(),
+}));
 
-    // Mock fetch
-    global.fetch = vi.fn();
-    
-    // Mock scrollIntoView
+vi.mock('./agent/tabs', () => ({
+  openAgentTab: vi.fn().mockResolvedValue(42),
+  getAgentTabUrl: vi.fn().mockResolvedValue('https://example.com'),
+  navigateAgentTab: vi.fn().mockResolvedValue(undefined),
+  sendToAgentTab: vi.fn(),
+  onAgentTabClosed: vi.fn().mockReturnValue(() => {}),
+}));
+
+import { sendToAgentTab } from './agent/tabs';
+import { selectProvider } from './providers/index';
+import type { Provider } from './providers/types';
+
+function mockStorage(initial: Record<string, unknown>) {
+  let state = { ...initial };
+  vi.mocked(chrome.storage.local.get).mockImplementation(((keys, callback) => {
+    const lookup = Array.isArray(keys) ? keys : [keys];
+    const out: Record<string, unknown> = {};
+    for (const key of lookup) {
+      if (key in state) out[key] = state[key];
+    }
+    if (typeof callback === 'function') callback(out);
+    return Promise.resolve(out);
+  }) as typeof chrome.storage.local.get);
+  vi.mocked(chrome.storage.local.set).mockImplementation(((data, callback) => {
+    state = { ...state, ...(data as Record<string, unknown>) };
+    if (typeof callback === 'function') callback();
+    return Promise.resolve();
+  }) as typeof chrome.storage.local.set);
+}
+
+describe('App integration', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockStorage({
+      provider: 'anthropic',
+      apiKey: 'k',
+      model: 'claude-opus-4-7',
+      baseUrl: 'https://api.openai.com/v1',
+      chatHistory: [],
+      siteAllowlist: { origins: {} },
+    });
+    vi.mocked(chrome.tabs.query).mockImplementation(((query, callback) => {
+      void query;
+      const tabs = [{ id: 1, url: 'https://example.com', title: 'Ex' }];
+      if (callback) callback(tabs);
+      return Promise.resolve(tabs);
+    }) as typeof chrome.tabs.query);
     window.HTMLElement.prototype.scrollIntoView = vi.fn();
   });
 
   afterEach(() => {
-    vi.restoreAllMocks();
+    vi.resetAllMocks();
   });
 
-  it('renders initial state correctly', async () => {
-    render(<App />);
-    expect(screen.getByText('test-model')).toBeInTheDocument();
-    expect(screen.getByText('Take actions with Aiside')).toBeInTheDocument();
-    expect(screen.getByPlaceholderText('Ask Aiside...')).toBeInTheDocument();
-  });
-
-  it('sends a message and displays response', async () => {
-    const user = userEvent.setup();
-    const encoder = new TextEncoder();
-    const stream = new ReadableStream({
-      start(controller) {
-        controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"Hello! "}}]}\n\n'));
-        controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"I am Aiside."}}]}\n\n'));
-        controller.enqueue(encoder.encode('data: [DONE]\n\n'));
-        controller.close();
+  it('plans, lets the user approve, and runs to finish', async () => {
+    const fakeProvider = {
+      proposePlan: vi.fn().mockResolvedValue({
+        summary: 'do',
+        steps: ['s1'],
+        sites: ['https://example.com'],
+      }),
+      runAgentStep: vi
+        .fn()
+        .mockResolvedValueOnce({ tool: 'click', targetId: 1, rationale: 'r' })
+        .mockResolvedValueOnce({ tool: 'finish', summary: 'done!' }),
+    };
+    vi.mocked(selectProvider).mockReturnValue(fakeProvider as Provider);
+    vi.mocked(sendToAgentTab).mockImplementation(async (_tabId, message) => {
+      if ((message as { type?: string }).type === 'GET_DOM_TREE') {
+        return {
+          dom: '<button id="1">x</button>',
+          url: 'https://example.com',
+          title: 'Ex',
+        };
       }
-    });
-
-    (global.fetch as any).mockResolvedValueOnce({
-      ok: true,
-      body: stream
+      return { success: true, message: 'ok' };
     });
 
     render(<App />);
-
-    const input = screen.getByPlaceholderText('Ask Aiside...');
-    await user.type(input, 'Hi there');
-    
-    // Press enter
-    await user.keyboard('{Enter}');
-
-    expect(screen.getByText('Hi there')).toBeInTheDocument();
-    
-    // Wait for the response
-    await waitFor(() => {
-      expect(screen.getByText('Hello! I am Aiside.')).toBeInTheDocument();
+    fireEvent.change(screen.getByPlaceholderText(/Ask Aiside/i), {
+      target: { value: 'do the thing' },
     });
+    fireEvent.click(screen.getByRole('button', { name: /send/i }));
 
-    expect(global.fetch).toHaveBeenCalledWith(
-      'https://test.api.com/chat/completions',
-      expect.objectContaining({
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer test-api-key'
-        },
-        body: JSON.stringify({
-          model: 'test-model',
-          messages: [
-            { role: 'user', content: 'Hi there' }
-          ],
-          stream: true
-        })
-      })
-    );
-  });
+    await waitFor(() => screen.getByRole('button', { name: /approve plan/i }));
+    fireEvent.click(screen.getByRole('button', { name: /approve plan/i }));
 
-  it('handles API errors gracefully', async () => {
-    const user = userEvent.setup();
-    
-    (global.fetch as any).mockResolvedValueOnce({
-      ok: false,
-      status: 503,
-      text: async () => JSON.stringify({ error: { message: 'Service Unavailable' } })
+    await waitFor(() => expect(screen.getAllByText(/done!/i).length).toBeGreaterThan(0), {
+      timeout: 3000,
     });
-
-    render(<App />);
-
-    const input = screen.getByPlaceholderText('Ask Aiside...');
-    await user.type(input, 'Test error handling{Enter}');
-
-    await waitFor(() => {
-      expect(screen.getByText(/Error: API Error: 503/)).toBeInTheDocument();
-    });
-  });
-
-  it('prompts user to open options page if API key is missing', async () => {
-    vi.mocked(chrome.storage.local.get).mockImplementation((keys, callback) => {
-      callback({
-        apiKey: '',
-        baseUrl: 'https://test.api.com',
-        model: 'test-model',
-        chatHistory: []
-      });
-    });
-
-    const user = userEvent.setup();
-    render(<App />);
-
-    // Mock alert
-    const alertMock = vi.spyOn(window, 'alert').mockImplementation(() => {});
-
-    const input = screen.getByPlaceholderText('Ask Aiside...');
-    await user.type(input, 'This should fail{Enter}');
-
-    expect(alertMock).toHaveBeenCalledWith('Please configure your API key in the extension options.');
-    expect(chrome.runtime.openOptionsPage).toHaveBeenCalled();
-  });
-
-  it('can read page context', async () => {
-    const user = userEvent.setup();
-    
-    const mockTabs = [{ id: 1 }];
-    vi.mocked(chrome.tabs.query).mockImplementation((query, callback) => {
-      callback(mockTabs as any);
-    });
-
-    vi.mocked(chrome.tabs.sendMessage).mockImplementation((tabId, request, callback: any) => {
-      if (request.type === 'GET_PAGE_CONTENT') {
-        callback({ text: 'This is the mock page content.' });
-      } else if (request.type === 'GET_DOM_TREE') {
-        callback({ dom: 'Mock DOM', url: 'http://test.com', title: 'Test Title' });
-      }
-    });
-
-    const encoder = new TextEncoder();
-    const stream = new ReadableStream({
-      start(controller) {
-        controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"Summary."}}]}\n\n'));
-        controller.enqueue(encoder.encode('data: [DONE]\n\n'));
-        controller.close();
-      }
-    });
-
-    (global.fetch as any).mockResolvedValueOnce({
-      ok: true,
-      body: stream
-    });
-
-    render(<App />);
-
-    const readButton = screen.getByTitle('Read Page Context');
-    await user.click(readButton);
-
-    await waitFor(() => {
-      expect(screen.getByText(/Please read this page context and summarize it/)).toBeInTheDocument();
-    });
-  });
-
-  it('handles GET_PAGE_CONTENT failing gracefully', async () => {
-    const user = userEvent.setup();
-    
-    const mockTabs = [{ id: 1, url: 'chrome://extensions', title: 'Extensions' }];
-    vi.mocked(chrome.tabs.query).mockImplementation((query, callback) => {
-      callback(mockTabs as any);
-    });
-
-    // Mock an undefined response (e.g. no content script on the page)
-    vi.mocked(chrome.tabs.sendMessage).mockImplementation((tabId, request, callback: any) => {
-      callback(); 
-    });
-
-    const encoder = new TextEncoder();
-    const stream = new ReadableStream({
-      start(controller) {
-        controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"Ok."}}]}\n\n'));
-        controller.enqueue(encoder.encode('data: [DONE]\n\n'));
-        controller.close();
-      }
-    });
-
-    (global.fetch as any).mockResolvedValueOnce({
-      ok: true,
-      body: stream
-    });
-
-    render(<App />);
-    
-    const readButton = screen.getByTitle('Read Page Context');
-    await user.click(readButton);
-
-    await waitFor(() => {
-      expect(screen.getByText(/\[No text content found\]/)).toBeInTheDocument();
-    });
-  });
-
-  it('updates configuration when storage changes', async () => {
-    render(<App />);
-    
-    const listener = vi.mocked(chrome.storage.onChanged.addListener).mock.calls[0][0];
-    
-    listener(
-      {
-        apiKey: { newValue: 'new-key', oldValue: 'test-api-key' },
-        baseUrl: { newValue: 'https://new-url.com', oldValue: 'https://test.api.com' },
-        model: { newValue: 'new-model', oldValue: 'test-model' }
-      },
-      'local'
-    );
-
-    // Verify config is updated by sending a request
-    const user = userEvent.setup();
-    const encoder = new TextEncoder();
-    const stream = new ReadableStream({
-      start(controller) {
-        controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"Updated config response"}}]}\n\n'));
-        controller.enqueue(encoder.encode('data: [DONE]\n\n'));
-        controller.close();
-      }
-    });
-    
-    (global.fetch as any).mockResolvedValueOnce({ ok: true, body: stream });
-
-    const input = screen.getByPlaceholderText('Ask Aiside...');
-    await user.type(input, 'Test{Enter}');
-    
-    await waitFor(() => {
-      expect(global.fetch).toHaveBeenCalledWith(
-        'https://new-url.com/chat/completions',
-        expect.objectContaining({
-          headers: expect.objectContaining({
-            'Authorization': 'Bearer new-key'
-          })
-        })
-      );
-    });
-  });
-
-  it('handles context menu selection events from background', async () => {
-    render(<App />);
-    const listener = vi.mocked(chrome.runtime.onMessage.addListener).mock.calls[0][0];
-    
-    act(() => {
-      listener({ type: "CONTEXT_MENU_SELECTION", text: "this is highlighted text" }, {}, () => {});
-    });
-    
-    const input = screen.getByPlaceholderText('Ask Aiside...') as HTMLTextAreaElement;
-    expect(input.value).toContain('Context:\n"this is highlighted text"');
-  });
-
-  it('opens options page when settings icon is clicked', async () => {
-    const user = userEvent.setup();
-    render(<App />);
-    
-    const settingsBtn = screen.getByTitle('Settings');
-    await user.click(settingsBtn);
-    
-    expect(chrome.runtime.openOptionsPage).toHaveBeenCalled();
+    expect(fakeProvider.runAgentStep).toHaveBeenCalledTimes(2);
   });
 });

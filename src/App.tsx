@@ -1,401 +1,342 @@
-import { useState, useEffect, useRef } from 'react';
-import { Plus, ArrowUp, MessageSquarePlus, Zap, MoreVertical, Wand2 } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { ArrowUp, MessageSquarePlus, MoreVertical } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
+import { runPlan, type ActionLogEntry, type LoopDeps, type LoopResult } from './agent/loop';
+import { validatePlan } from './agent/plan';
+import {
+  getAgentTabUrl,
+  navigateAgentTab,
+  onAgentTabClosed,
+  openAgentTab,
+  sendToAgentTab,
+} from './agent/tabs';
+import * as allowlist from './agent/allowlist';
+import { ActionLogRow } from './components/ActionLogRow';
+import { PlanCard } from './components/PlanCard';
+import { selectProvider } from './providers/index';
+import type { AgentAction, Message, Plan, ProviderConfig } from './providers/types';
 
-interface Message {
-  role: 'user' | 'assistant' | 'system';
-  content: string;
+type RunState = 'idle' | 'planning' | 'awaiting-approval' | 'running' | 'paused' | 'done' | 'error';
+
+const MAX_STEPS = 25;
+
+interface ChatItem {
+  kind: 'message' | 'plan' | 'log';
+  message?: Message;
+  plan?: Plan;
+  entry?: ActionLogEntry;
 }
 
 function App() {
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [items, setItems] = useState<ChatItem[]>([]);
   const [input, setInput] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [isAgentMode, setIsAgentMode] = useState(false);
-  const [config, setConfig] = useState({ apiKey: '', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o' });
+  const [runState, setRunState] = useState<RunState>('idle');
+  const [pauseReason, setPauseReason] = useState('');
+  const [config, setConfig] = useState<ProviderConfig>({
+    provider: 'anthropic',
+    apiKey: '',
+    baseUrl: 'https://api.openai.com/v1',
+    model: 'claude-opus-4-7',
+    sendScreenshots: false,
+  });
+  const [pendingPlan, setPendingPlan] = useState<Plan | null>(null);
+  const stopController = useRef<AbortController | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Load config & history
   useEffect(() => {
-    chrome.storage.local.get(['apiKey', 'baseUrl', 'model', 'chatHistory'], (res) => {
-      if (res.apiKey) setConfig(prev => ({ ...prev, apiKey: res.apiKey as string }));
-      if (res.baseUrl) setConfig(prev => ({ ...prev, baseUrl: res.baseUrl as string }));
-      if (res.model) setConfig(prev => ({ ...prev, model: res.model as string }));
-      if (res.chatHistory) setMessages(res.chatHistory as Message[]);
-    });
+    chrome.storage.local.get(
+      ['provider', 'apiKey', 'baseUrl', 'model', 'sendScreenshots'],
+      (result) => {
+        setConfig({
+          provider: result.provider === 'openai' ? 'openai' : 'anthropic',
+          apiKey: (result.apiKey as string) ?? '',
+          baseUrl: (result.baseUrl as string) ?? 'https://api.openai.com/v1',
+          model: (result.model as string) ?? 'claude-opus-4-7',
+          sendScreenshots: Boolean(result.sendScreenshots),
+        });
+      },
+    );
 
-    const messageListener = (msg: any) => {
-      if (msg.type === "CONTEXT_MENU_SELECTION") {
-        setInput(prev => prev + `\n\nContext:\n"${msg.text}"\n\n`);
+    const messageListener = (message: { type?: string; text?: string }) => {
+      if (message.type === 'CONTEXT_MENU_SELECTION' && message.text) {
+        setInput((previous) => `${previous}\n\nContext:\n"${message.text}"\n\n`);
       }
     };
     chrome.runtime.onMessage.addListener(messageListener);
-
-    const storageListener = (changes: { [key: string]: chrome.storage.StorageChange }, areaName: string) => {
-      if (areaName === 'local') {
-        setConfig(prev => ({
-          ...prev,
-          apiKey: changes.apiKey !== undefined ? (changes.apiKey.newValue as string) : prev.apiKey,
-          baseUrl: changes.baseUrl !== undefined ? (changes.baseUrl.newValue as string) : prev.baseUrl,
-          model: changes.model !== undefined ? (changes.model.newValue as string) : prev.model,
-        }));
-      }
-    };
-    chrome.storage.onChanged.addListener(storageListener);
-
-    return () => {
-      chrome.runtime.onMessage.removeListener(messageListener);
-      chrome.storage.onChanged.removeListener(storageListener);
-    };
+    return () => chrome.runtime.onMessage.removeListener(messageListener);
   }, []);
 
-  // Save history
   useEffect(() => {
-    chrome.storage.local.set({ chatHistory: messages });
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+  }, [items]);
 
-  const getDOMTree = (): Promise<{dom: string, url: string, title: string}> => {
+  const append = (item: ChatItem) => setItems((previous) => [...previous, item]);
+
+  async function getCurrentTab(): Promise<{ url: string; title: string }> {
     return new Promise((resolve) => {
       chrome.tabs.query({ active: true, lastFocusedWindow: true }, (tabs) => {
         const tab = tabs[0];
-        if (tab?.id) {
-          chrome.tabs.sendMessage(tab.id, { type: "GET_DOM_TREE" }, (response) => {
-            if (chrome.runtime.lastError) {
-               // Ignore error, means content script isn't there (e.g. chrome:// tabs)
-               resolve({ dom: 'Cannot read restricted page (like chrome://) or page is still loading.', url: tab.url || '', title: tab.title || '' });
-               return;
-            }
-            if (response && response.dom) {
-              resolve({ dom: response.dom.substring(0, 30000), url: response.url || tab.url || '', title: response.title || tab.title || '' });
-            } else {
-              resolve({ dom: 'No interactive elements found.', url: tab.url || '', title: tab.title || '' });
-            }
-          });
-        } else {
-          resolve({ dom: 'No active tab found.', url: '', title: '' });
-        }
+        resolve({ url: tab?.url ?? '', title: tab?.title ?? '' });
       });
     });
-  };
+  }
 
-  const getPageContext = (): Promise<string> => {
-    return new Promise((resolve) => {
-      chrome.tabs.query({ active: true, lastFocusedWindow: true }, (tabs) => {
-        const tab = tabs[0];
-        if (tab?.id) {
-          chrome.tabs.sendMessage(tab.id, { type: "GET_PAGE_CONTENT" }, (response) => {
-            if (chrome.runtime.lastError) {
-               resolve(`URL: ${tab.url}\nTitle: ${tab.title}\n\n[Cannot extract text from restricted pages like chrome:// tabs]`);
-               return;
-            }
-            if (response?.text) {
-              resolve(`URL: ${tab.url}\nTitle: ${tab.title}\n\n${response.text.substring(0, 15000)}`);
-            } else {
-              resolve(`URL: ${tab.url}\nTitle: ${tab.title}\n\n[No text content found]`);
-            }
-          });
-        } else {
-          resolve('');
-        }
-      });
-    });
-  };
-
-  const executeAction = (action: string, targetId?: string, value?: string): Promise<string> => {
-    return new Promise((resolve) => {
-      chrome.tabs.query({ active: true, lastFocusedWindow: true }, (tabs) => {
-        const tab = tabs[0];
-        if (tab?.id) {
-          chrome.tabs.sendMessage(tab.id, { type: "EXECUTE_ACTION", payload: { action, targetId, value } }, (response) => {
-            resolve(response?.message || response?.error || "Action execution failed");
-          });
-        } else {
-          resolve("No active tab found");
-        }
-      });
-    });
-  };
-
-  const handleSend = async (textToSubmit?: string, isSystemAutoReply?: boolean) => {
-    const finalInput = textToSubmit || input;
-    if (!finalInput.trim() && !isSystemAutoReply) return;
+  async function handleSend() {
+    const text = input.trim();
+    if (!text || runState !== 'idle') return;
     if (!config.apiKey) {
-      alert("Please configure your API key in the extension options.");
+      alert('Please configure your API key in the extension options.');
       chrome.runtime.openOptionsPage();
       return;
     }
 
-    setLoading(true);
-    let currentMessages = [...messages];
-    
-    if (!isSystemAutoReply) {
-       currentMessages.push({ role: 'user', content: finalInput } as Message);
-       setMessages([...currentMessages]);
-       if (!textToSubmit) setInput('');
-    }
+    setInput('');
+    const userMsg: Message = { role: 'user', content: text };
+    append({ kind: 'message', message: userMsg });
 
-    // Agent mode preparation
-    let systemPrompt: Message | null = null;
-    if (isAgentMode) {
-       const pageData = await getDOMTree();
-       systemPrompt = { 
-         role: 'system', 
-         content: `You are a browser automation agent. You can view the current webpage and take actions.
-Current URL: ${pageData.url}
-Page Title: ${pageData.title}
-
-INTERACTIVE ELEMENTS:
-${pageData.dom}
-
-If the user asks you to do something on the page (click, type, search, navigate), you must output ONLY a JSON block like this to execute an action:
-\`\`\`json
-{"action": "click", "targetId": "123"}
-\`\`\`
-Valid actions: click, type (requires "value"), navigate (requires "value" as URL), scroll.
-If you do not need to take an action, reply normally.`
-       };
-    }
-
-    const messagesToSend = systemPrompt ? [systemPrompt, ...currentMessages] : currentMessages;
+    setRunState('planning');
+    const provider = selectProvider(config);
+    stopController.current = new AbortController();
 
     try {
-      const url = `${config.baseUrl.replace(/\/$/, '')}/chat/completions`;
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${config.apiKey}`
-        },
-        body: JSON.stringify({
-          model: config.model,
-          messages: messagesToSend.map(m => ({ role: m.role, content: m.content })),
-          stream: true
-        })
+      const currentTab = await getCurrentTab();
+      const rawPlan = await provider.proposePlan({
+        history: [userMsg],
+        currentTab,
+        signal: stopController.current.signal,
       });
+      const plan = validatePlan(rawPlan);
+      setPendingPlan(plan);
+      append({ kind: 'plan', plan });
+      setRunState('awaiting-approval');
+    } catch (err) {
+      append({
+        kind: 'message',
+        message: { role: 'assistant', content: `Plan failed: ${(err as Error).message}` },
+      });
+      setRunState('error');
+      setTimeout(() => setRunState('idle'), 0);
+    }
+  }
 
-      if (!response.ok) {
-        let errorMsg = `API Error: ${response.status}`;
-        try {
-          const errorText = await response.text();
-          try {
-            const errorData = JSON.parse(errorText);
-            errorMsg += ` - ${errorData?.error?.message || JSON.stringify(errorData)}`;
-          } catch {
-            if (errorText) errorMsg += ` - ${errorText}`;
-          }
-        } catch (e) {}
-        throw new Error(errorMsg);
-      }
+  async function handleApprove() {
+    if (!pendingPlan) return;
 
-      setLoading(false);
-      let streamedResponse = '';
-      setMessages([...currentMessages, { role: 'assistant', content: '' }]);
+    const plan = pendingPlan;
+    setPendingPlan(null);
+    setRunState('running');
+    await allowlist.addAll(plan.sites);
+    const tabId = await openAgentTab(plan.sites[0]);
+    const dispose = onAgentTabClosed(tabId, () => {
+      setRunState('paused');
+      setPauseReason('Agent tab was closed');
+      stopController.current?.abort();
+    });
 
-      const reader = response.body?.getReader();
-      const decoder = new TextDecoder('utf-8');
+    const provider = selectProvider(config);
+    stopController.current = new AbortController();
+    const deps: LoopDeps = {
+      agentTabId: tabId,
+      getDomTree: () =>
+        sendToAgentTab<{ dom: string; url: string; title: string }>(tabId, {
+          type: 'GET_DOM_TREE',
+        }),
+      getCurrentUrl: () => getAgentTabUrl(tabId),
+      executeAction: (action) =>
+        sendToAgentTab(tabId, {
+          type: 'EXECUTE_ACTION',
+          payload: actionToContentPayload(action),
+        }),
+      navigate: (url) => navigateAgentTab(tabId, url),
+      isAllowed: (origin) => allowlist.has(origin),
+      onLog: (entry) => append({ kind: 'log', entry }),
+      maxSteps: MAX_STEPS,
+    };
 
-      if (reader) {
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          
-          const chunk = decoder.decode(value, { stream: true });
-          const lines = chunk.split('\n');
-          
-          for (const line of lines) {
-            if (line.startsWith('data: ')) {
-              const dataStr = line.replace('data: ', '').trim();
-              if (dataStr === '[DONE]') break;
-              
-              try {
-                const data = JSON.parse(dataStr);
-                const content = data.choices?.[0]?.delta?.content;
-                if (content) {
-                  streamedResponse += content;
-                  setMessages([...currentMessages, { role: 'assistant', content: streamedResponse }]);
-                }
-              } catch (e) {
-                // Ignore parse errors on partial chunks
-              }
-            }
-          }
-        }
-      }
-
-      // Check if AI output an action
-      if (isAgentMode) {
-        const jsonMatch = streamedResponse.match(/```json\s*(\{[\s\S]*?\})\s*```/);
-        if (jsonMatch) {
-          try {
-            const actionJson = JSON.parse(jsonMatch[1]);
-            if (actionJson.action) {
-              const result = await executeAction(actionJson.action, actionJson.targetId, actionJson.value);
-              currentMessages.push({ role: 'assistant', content: streamedResponse });
-              currentMessages.push({ role: 'system', content: `[Action Result]: ${result}\nIf task is done, summarize. If not, output next JSON action.` });
-              setMessages([...currentMessages]);
-              // Wait briefly before next action
-              setTimeout(() => {
-                handleSend(undefined, true);
-              }, 500);
-              return; // return early so we don't duplicate state update
-            }
-          } catch(e) {
-            console.error("Action parse failed", e);
-          }
-        }
-      }
-      
-      // Final save for non-action or failed action parsing
-      currentMessages.push({ role: 'assistant', content: streamedResponse });
-      setMessages([...currentMessages]);
-      
-    } catch (error: any) {
-      console.error(error);
-      setMessages([...currentMessages, { role: 'assistant', content: `Error: ${error.message}` }]);
+    let result: LoopResult;
+    try {
+      result = await runPlan(plan, provider, deps, stopController.current.signal);
+    } catch (err) {
+      result = { status: 'error', error: err as Error };
     } finally {
-      setLoading(false);
+      dispose();
     }
-  };
 
-  const handleReadPage = async () => {
-    const pageText = await getPageContext();
-    if (pageText) {
-      handleSend(`Please read this page context and summarize it or help me with it:\n\n${pageText}`);
+    if (result.status === 'done') {
+      append({ kind: 'message', message: { role: 'assistant', content: result.summary } });
+      await allowlist.touch(plan.sites[0]);
+      setRunState('done');
+      setTimeout(() => setRunState('idle'), 0);
+    } else if (result.status === 'paused') {
+      setPauseReason(result.reason);
+      setRunState('paused');
+    } else if (result.status === 'aborted') {
+      append({ kind: 'message', message: { role: 'assistant', content: 'Stopped.' } });
+      setRunState('idle');
     } else {
-      alert("Could not extract page content.");
+      append({
+        kind: 'message',
+        message: { role: 'assistant', content: `Error: ${result.error.message}` },
+      });
+      setRunState('error');
+      setTimeout(() => setRunState('idle'), 0);
     }
-  };
+  }
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
-    }
-  };
+  function handleMakeChanges() {
+    if (!pendingPlan) return;
+    const draft = `Refine this plan:\n\nSummary: ${pendingPlan.summary}\nSites:\n${pendingPlan.sites
+      .map((site) => `- ${site}`)
+      .join('\n')}\nSteps:\n${pendingPlan.steps
+      .map((step, index) => `${index + 1}. ${step}`)
+      .join('\n')}\n\nMy changes: `;
+    setInput(draft);
+    setPendingPlan(null);
+    setRunState('idle');
+  }
 
-  const clearHistory = () => {
-    setMessages([]);
-  };
+  function handleStop() {
+    stopController.current?.abort();
+    setRunState('idle');
+  }
+
+  function clearHistory() {
+    setItems([]);
+    setRunState('idle');
+    setPendingPlan(null);
+  }
 
   return (
     <div className="flex flex-col h-screen bg-[#2b2d31] text-gray-200 font-sans">
-      {/* Header */}
-      <header className="flex items-center justify-between px-4 py-3 bg-[#2b2d31]">
-        <div className="flex items-center gap-2 cursor-pointer hover:bg-white/5 px-2 py-1 rounded-md transition-colors" onClick={() => chrome.runtime.openOptionsPage()}>
+      <header className="flex items-center justify-between px-4 py-3">
+        <button
+          className="flex items-center gap-2 hover:bg-white/5 px-2 py-1 rounded-md"
+          onClick={() => chrome.runtime.openOptionsPage()}
+        >
           <span className="text-[15px] font-medium">{config.model || 'Model'}</span>
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-gray-400"><path d="m6 9 6 6 6-6"/></svg>
-        </div>
+        </button>
         <div className="flex items-center gap-4 text-gray-400">
-          <button className="hover:text-gray-200 transition-colors" title="Read Page Context" onClick={handleReadPage}>
-            <Zap size={18} />
-          </button>
-          <button className="hover:text-gray-200 transition-colors" title="New Chat" onClick={clearHistory}>
+          <button onClick={clearHistory} title="New chat">
             <MessageSquarePlus size={18} />
           </button>
-          <button onClick={() => chrome.runtime.openOptionsPage()} className="hover:text-gray-200 transition-colors" title="Settings">
+          <button onClick={() => chrome.runtime.openOptionsPage()} title="Settings">
             <MoreVertical size={18} />
           </button>
         </div>
       </header>
 
-      {/* Chat History */}
-      <main className="flex-1 overflow-y-auto px-4 py-2 space-y-6 scrollbar-thin scrollbar-thumb-gray-600 scrollbar-track-transparent">
-        {messages.length === 0 ? (
+      <main className="flex-1 overflow-y-auto px-4 py-2 space-y-3">
+        {items.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center max-w-md mx-auto mt-[-40px]">
-            <div className="w-16 h-16 bg-white rounded-2xl flex items-center justify-center mb-6 shadow-sm overflow-hidden">
-              <div className="text-3xl">👋</div>
+            <div className="w-16 h-16 bg-white rounded-lg flex items-center justify-center mb-6 shadow-sm">
+              <span className="text-3xl">AI</span>
             </div>
             <h2 className="text-gray-300 text-[15px] mb-6">Take actions with Aiside</h2>
-            
-            <div className="w-full flex flex-col gap-3">
-              <button onClick={() => handleSend("Summarize recent activity")} className="bg-transparent border border-gray-600 hover:bg-white/5 text-gray-200 text-sm py-3 px-4 rounded-full transition-colors text-center w-full">
-                Summarize recent activity
-              </button>
-              <button onClick={() => handleSend("Explain the current page")} className="bg-transparent border border-gray-600 hover:bg-white/5 text-gray-200 text-sm py-3 px-4 rounded-full transition-colors text-center w-full">
-                Explain the current page
-              </button>
-              <button onClick={handleReadPage} className="bg-transparent border border-gray-600 hover:bg-white/5 text-gray-200 text-sm py-3 px-4 rounded-full transition-colors text-center w-full">
-                Read and provide feedback
-              </button>
-            </div>
           </div>
         ) : (
-          messages.map((msg, i) => (
-            <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-              <div className={`max-w-[88%] text-[15px] leading-relaxed ${
-                msg.role === 'user' 
-                  ? 'bg-[#383a40] text-gray-100 rounded-2xl px-4 py-3' 
-                  : 'text-gray-200 py-1'
-              }`}>
-                <div className={msg.role === 'user' ? '' : 'prose prose-invert prose-sm max-w-none prose-p:leading-relaxed prose-pre:bg-[#1e1f22] prose-pre:border prose-pre:border-gray-700'}>
-                  {msg.role === 'user' ? (
-                    <p className="whitespace-pre-wrap">{msg.content}</p>
-                  ) : (
-                    <ReactMarkdown>{msg.content}</ReactMarkdown>
-                  )}
+          items.map((item, index) => {
+            if (item.kind === 'message' && item.message) {
+              const message = item.message;
+              return (
+                <div
+                  key={index}
+                  className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                >
+                  <div
+                    className={`max-w-[88%] text-[15px] leading-relaxed ${
+                      message.role === 'user'
+                        ? 'bg-[#383a40] text-gray-100 rounded-2xl px-4 py-3'
+                        : 'text-gray-200 py-1'
+                    }`}
+                  >
+                    {message.role === 'user' ? (
+                      <p className="whitespace-pre-wrap">{message.content}</p>
+                    ) : (
+                      <ReactMarkdown>{message.content}</ReactMarkdown>
+                    )}
+                  </div>
                 </div>
-              </div>
-            </div>
-          ))
+              );
+            }
+
+            if (item.kind === 'plan' && item.plan) {
+              return (
+                <PlanCard
+                  key={index}
+                  plan={item.plan}
+                  onApprove={handleApprove}
+                  onMakeChanges={handleMakeChanges}
+                  disabled={runState !== 'awaiting-approval'}
+                />
+              );
+            }
+
+            if (item.kind === 'log' && item.entry) {
+              return <ActionLogRow key={index} entry={item.entry} />;
+            }
+
+            return null;
+          })
         )}
-        {loading && (
+
+        {(runState === 'planning' || runState === 'running') && (
           <div className="flex justify-start">
             <div className="text-gray-400 py-2 flex items-center gap-2 text-sm">
-              <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-              <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-              <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+              <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" />
+              <div
+                className="w-2 h-2 bg-gray-400 rounded-full animate-bounce"
+                style={{ animationDelay: '150ms' }}
+              />
+              <div
+                className="w-2 h-2 bg-gray-400 rounded-full animate-bounce"
+                style={{ animationDelay: '300ms' }}
+              />
             </div>
+          </div>
+        )}
+
+        {runState === 'paused' && (
+          <div className="rounded-md border border-yellow-700 bg-yellow-900/20 text-yellow-200 px-3 py-2 text-sm">
+            Paused - {pauseReason}.
           </div>
         )}
         <div ref={messagesEndRef} />
       </main>
 
-      {/* Input Area */}
       <footer className="p-4 pt-2">
-        <div className="bg-[#383a40] border border-gray-600/50 rounded-2xl p-3 flex flex-col gap-2 focus-within:border-gray-500 transition-colors shadow-sm">
+        <div className="bg-[#383a40] border border-gray-600/50 rounded-2xl p-3 flex flex-col gap-2">
           <textarea
             value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
+            onChange={(event) => setInput(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' && !event.shiftKey) {
+                event.preventDefault();
+                handleSend();
+              }
+            }}
             placeholder="Ask Aiside..."
             className="w-full max-h-48 min-h-[24px] bg-transparent border-none resize-none text-[15px] text-gray-200 placeholder-gray-500 focus:outline-none"
             rows={1}
           />
-          
-          <div className="flex items-center justify-between mt-1">
-            <div className="flex items-center gap-3 text-gray-400">
-              <button 
-                onClick={() => setIsAgentMode(!isAgentMode)}
-                className={`flex items-center gap-1 transition-colors text-xs font-medium ${isAgentMode ? 'text-blue-400 hover:text-blue-300' : 'hover:text-gray-200'}`} 
-                title={isAgentMode ? "Agent Mode: ON (Will act on page)" : "Agent Mode: OFF (Chat only)"}
+          <div className="flex items-center justify-end">
+            {runState === 'running' ? (
+              <button onClick={handleStop} className="text-xs px-3 py-1 rounded-md bg-red-600 text-white">
+                Stop
+              </button>
+            ) : (
+              <button
+                onClick={handleSend}
+                aria-label="Send"
+                disabled={!input.trim() || runState !== 'idle'}
+                className={`p-1.5 rounded-full ${
+                  input.trim() && runState === 'idle'
+                    ? 'bg-[#d97757] text-white'
+                    : 'bg-[#4a4c52] text-gray-500'
+                }`}
               >
-                <span className={`w-3 h-3 border rounded-sm flex items-center justify-center text-[8px] ${isAgentMode ? 'border-blue-400 bg-blue-400/20 text-blue-400' : 'border-gray-400'}`}>
-                  {isAgentMode ? '⚡' : '✋'}
-                </span>
-                {isAgentMode ? 'Auto Action' : 'Ask before acting'}
-                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+                <ArrowUp size={16} strokeWidth={2.5} />
               </button>
-              
-              <button className="hover:text-gray-200 transition-colors ml-2" title="Format/Magic">
-                <Wand2 size={16} />
-              </button>
-              <button className="hover:text-gray-200 transition-colors" title="Add attachment">
-                <Plus size={18} />
-              </button>
-            </div>
-            
-            <button
-              onClick={() => handleSend()}
-              disabled={!input.trim() || loading}
-              className={`p-1.5 rounded-full transition-colors flex items-center justify-center ${
-                input.trim() && !loading 
-                  ? 'bg-[#d97757] text-white hover:bg-[#c96a4a]' 
-                  : 'bg-[#4a4c52] text-gray-500'
-              }`}
-            >
-              <ArrowUp size={16} strokeWidth={2.5} />
-            </button>
+            )}
           </div>
         </div>
         <div className="text-center mt-3 text-[11px] text-gray-500">
@@ -404,6 +345,25 @@ If you do not need to take an action, reply normally.`
       </footer>
     </div>
   );
+}
+
+function actionToContentPayload(action: AgentAction): {
+  action: string;
+  targetId?: number;
+  value?: string;
+} {
+  switch (action.tool) {
+    case 'click':
+      return { action: 'click', targetId: action.targetId };
+    case 'type':
+      return { action: 'type', targetId: action.targetId, value: action.value };
+    case 'scroll':
+      return { action: 'scroll' };
+    case 'navigate':
+      return { action: 'navigate', value: action.url };
+    case 'finish':
+      return { action: 'finish' };
+  }
 }
 
 export default App;
