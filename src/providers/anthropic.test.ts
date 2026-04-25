@@ -80,6 +80,34 @@ describe('AnthropicProvider', () => {
     expect(headers['anthropic-dangerous-direct-browser-access']).toBe('true');
   });
 
+  it('uses configured baseUrl when provided', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => '{}',
+      json: async () => ({
+        content: [
+          {
+            type: 'tool_use',
+            name: 'propose_plan',
+            input: { summary: 's', steps: ['a'], sites: ['https://x.com'] },
+          },
+        ],
+      }),
+    });
+    global.fetch = fetchSpy;
+    const provider = new AnthropicProvider({
+      ...config,
+      baseUrl: 'https://anthropic-proxy.test/v1/',
+    });
+    await provider.proposePlan({
+      history: [{ role: 'user', content: 'x' }],
+      currentTab: { url: 'https://x.com', title: '' },
+      signal: new AbortController().signal,
+    });
+    expect(fetchSpy.mock.calls[0][0]).toBe('https://anthropic-proxy.test/v1/messages');
+  });
+
   it('throws on non-OK response', async () => {
     mockFetchOnce({ error: 'bad' }, { ok: false, status: 500 });
     const provider = new AnthropicProvider(config);

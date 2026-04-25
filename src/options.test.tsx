@@ -87,7 +87,7 @@ describe('Options component', () => {
     mockStorage({
       provider: 'anthropic',
       apiKey: 'k',
-      baseUrl: 'https://api.openai.com/v1',
+      baseUrl: 'https://api.anthropic.com/v1',
       model: 'claude-opus-4-7',
       sendScreenshots: false,
       siteAllowlist: { origins: {} },
@@ -98,6 +98,24 @@ describe('Options component', () => {
     await waitFor(() => {
       expect(screen.getByLabelText(/anthropic/i)).toBeChecked();
       expect(screen.getByLabelText(/openai-compatible/i)).not.toBeChecked();
+    });
+    expect(screen.getByLabelText('Base URL')).toHaveValue('https://api.anthropic.com/v1');
+  });
+
+  it('keeps Base URL visible when Anthropic is selected', async () => {
+    mockStorage({
+      provider: 'anthropic',
+      apiKey: 'k',
+      baseUrl: 'https://proxy.example.com/v1',
+      model: 'claude-opus-4-7',
+      sendScreenshots: false,
+      siteAllowlist: { origins: {} },
+    });
+
+    render(<Options />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('Base URL')).toHaveValue('https://proxy.example.com/v1');
     });
   });
 

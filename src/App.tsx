@@ -35,7 +35,7 @@ function App() {
   const [config, setConfig] = useState<ProviderConfig>({
     provider: 'anthropic',
     apiKey: '',
-    baseUrl: 'https://api.openai.com/v1',
+    baseUrl: 'https://api.anthropic.com/v1',
     model: 'claude-opus-4-7',
     sendScreenshots: false,
   });
@@ -50,7 +50,7 @@ function App() {
         setConfig({
           provider: result.provider === 'openai' ? 'openai' : 'anthropic',
           apiKey: (result.apiKey as string) ?? '',
-          baseUrl: (result.baseUrl as string) ?? 'https://api.openai.com/v1',
+          baseUrl: (result.baseUrl as string) ?? 'https://api.anthropic.com/v1',
           model: (result.model as string) ?? 'claude-opus-4-7',
           sendScreenshots: Boolean(result.sendScreenshots),
         });

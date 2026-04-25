@@ -5,6 +5,11 @@ import './index.css';
 
 type ProviderName = 'anthropic' | 'openai';
 
+const DEFAULT_BASE_URLS: Record<ProviderName, string> = {
+  anthropic: 'https://api.anthropic.com/v1',
+  openai: 'https://api.openai.com/v1',
+};
+
 const VISION_PREFIXES: Record<ProviderName, string[]> = {
   anthropic: ['claude-'],
   openai: ['gpt-4o', 'gpt-4-vision'],
@@ -13,7 +18,7 @@ const VISION_PREFIXES: Record<ProviderName, string[]> = {
 const Options = () => {
   const [provider, setProvider] = useState<ProviderName>('anthropic');
   const [apiKey, setApiKey] = useState('');
-  const [baseUrl, setBaseUrl] = useState('https://api.openai.com/v1');
+  const [baseUrl, setBaseUrl] = useState(DEFAULT_BASE_URLS.anthropic);
   const [model, setModel] = useState('claude-opus-4-7');
   const [sendScreenshots, setSendScreenshots] = useState(false);
   const [allowed, setAllowed] = useState<
@@ -52,6 +57,17 @@ const Options = () => {
     });
   };
 
+  const handleProviderChange = (nextProvider: ProviderName) => {
+    setProvider(nextProvider);
+    if (
+      !baseUrl ||
+      baseUrl === DEFAULT_BASE_URLS.anthropic ||
+      baseUrl === DEFAULT_BASE_URLS.openai
+    ) {
+      setBaseUrl(DEFAULT_BASE_URLS[nextProvider]);
+    }
+  };
+
   const handleRevoke = async (origin: string) => {
     await revoke(origin);
     await refreshAllowed();
@@ -79,7 +95,7 @@ const Options = () => {
                 name="provider"
                 value="anthropic"
                 checked={provider === 'anthropic'}
-                onChange={() => setProvider('anthropic')}
+                onChange={() => handleProviderChange('anthropic')}
               />
               Anthropic
             </label>
@@ -89,7 +105,7 @@ const Options = () => {
                 name="provider"
                 value="openai"
                 checked={provider === 'openai'}
-                onChange={() => setProvider('openai')}
+                onChange={() => handleProviderChange('openai')}
               />
               OpenAI-compatible
             </label>
@@ -109,24 +125,24 @@ const Options = () => {
             />
           </div>
 
-          {provider === 'openai' && (
-            <div>
-              <label htmlFor="baseUrl" className="block text-sm font-medium text-gray-700 mb-1">
-                Base URL
-              </label>
-              <input
-                id="baseUrl"
-                type="url"
-                value={baseUrl}
-                onChange={(event) => setBaseUrl(event.target.value)}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md"
-                placeholder="https://api.openai.com/v1"
-              />
-              <p className="mt-1 text-xs text-gray-500">
-                For example: https://api.openai.com/v1 or http://localhost:11434/v1
-              </p>
-            </div>
-          )}
+          <div>
+            <label htmlFor="baseUrl" className="block text-sm font-medium text-gray-700 mb-1">
+              Base URL
+            </label>
+            <input
+              id="baseUrl"
+              type="url"
+              value={baseUrl}
+              onChange={(event) => setBaseUrl(event.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-md"
+              placeholder={DEFAULT_BASE_URLS[provider]}
+            />
+            <p className="mt-1 text-xs text-gray-500">
+              {provider === 'anthropic'
+                ? 'Default: https://api.anthropic.com/v1'
+                : 'For example: https://api.openai.com/v1 or http://localhost:11434/v1'}
+            </p>
+          </div>
 
           <div>
             <label htmlFor="modelName" className="block text-sm font-medium text-gray-700 mb-1">

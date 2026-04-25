@@ -9,7 +9,7 @@ import type {
   RunAgentStepInput,
 } from './types';
 
-const ENDPOINT = 'https://api.anthropic.com/v1/messages';
+const DEFAULT_BASE_URL = 'https://api.anthropic.com/v1';
 
 interface AnthropicToolUseBlock {
   type?: string;
@@ -82,7 +82,8 @@ export class AnthropicProvider implements Provider {
       })),
       tool_choice: opts.tool_choice,
     };
-    const res = await fetch(ENDPOINT, {
+    const url = `${(this.cfg.baseUrl ?? DEFAULT_BASE_URL).replace(/\/$/, '')}/messages`;
+    const res = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
