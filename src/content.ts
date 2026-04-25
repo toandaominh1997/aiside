@@ -1,5 +1,5 @@
 // Map to store interactive elements for action execution
-let interactiveElements = new Map<number, HTMLElement>();
+const interactiveElements = new Map<number, HTMLElement>();
 let nextElementId = 1;
 
 function isInteractive(el: HTMLElement): boolean {
@@ -38,7 +38,7 @@ function getSimplifiedDOM() {
       const id = nextElementId++;
       interactiveElements.set(id, el);
       
-      let tag = el.tagName.toLowerCase();
+      const tag = el.tagName.toLowerCase();
       let text = (el.innerText || el.textContent || '').trim().substring(0, 50) || el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.getAttribute('value') || '';
       text = text.replace(/\n/g, ' '); // Clean up newlines
       
@@ -70,7 +70,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     sendResponse({ dom: getSimplifiedDOM(), url: window.location.href, title: document.title });
   } else if (request.type === "EXECUTE_ACTION") {
     const { action, targetId, value } = request.payload;
-    const el = interactiveElements.get(parseInt(targetId));
+    const el = interactiveElements.get(parseInt(String(targetId)));
     
     if (!el && action !== 'navigate') {
       sendResponse({ success: false, error: `Element with id ${targetId} not found` });
@@ -99,8 +99,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       } else {
         sendResponse({ success: false, error: `Unknown action: ${action}` });
       }
-    } catch (e: any) {
-      sendResponse({ success: false, error: e.message });
+    } catch (e: unknown) {
+      sendResponse({ success: false, error: e instanceof Error ? e.message : String(e) });
     }
   }
   return true;
