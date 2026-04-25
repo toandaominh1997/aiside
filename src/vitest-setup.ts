@@ -7,6 +7,7 @@ const mockChrome = {
     local: {
       get: vi.fn(),
       set: vi.fn(),
+      remove: vi.fn(),
     },
     onChanged: {
       addListener: vi.fn(),
@@ -23,10 +24,23 @@ const mockChrome = {
     },
     sendMessage: vi.fn(),
     openOptionsPage: vi.fn(),
+    lastError: undefined as undefined | { message: string },
   },
   tabs: {
     query: vi.fn(),
     sendMessage: vi.fn(),
+    create: vi.fn(),
+    get: vi.fn(),
+    update: vi.fn(),
+    captureVisibleTab: vi.fn(),
+    onRemoved: {
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+    },
+    onUpdated: {
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+    },
   },
   sidePanel: {
     setPanelBehavior: vi.fn(() => Promise.resolve()),
@@ -36,12 +50,12 @@ const mockChrome = {
     create: vi.fn(),
     onClicked: {
       addListener: vi.fn(),
-    }
+    },
   },
 };
 
 beforeAll(() => {
-  (global as any).chrome = mockChrome;
+  (globalThis as { chrome: typeof mockChrome }).chrome = mockChrome;
 });
 
 afterEach(() => {
