@@ -28,6 +28,7 @@ export interface ProposePlanInput {
   history: Message[];
   currentTab: { url: string; title: string };
   signal: AbortSignal;
+  onChunk?: (chunk: string) => void;
 }
 
 export interface RunAgentStepInput {
@@ -36,6 +37,7 @@ export interface RunAgentStepInput {
   dom: string;
   screenshot?: string;
   signal: AbortSignal;
+  onChunk?: (chunk: string) => void;
 }
 
 export interface Provider {

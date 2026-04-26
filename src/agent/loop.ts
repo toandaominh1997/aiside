@@ -1,5 +1,4 @@
 import type { AgentAction, Message, Plan, Provider } from '../providers/types';
-import { normalizeOrigin } from './plan';
 
 export interface ActionLogEntry {
   id: string;
@@ -20,7 +19,6 @@ export interface LoopDeps {
     action: AgentAction,
   ) => Promise<{ success: boolean; message?: string; error?: string }>;
   navigate: (url: string) => Promise<void>;
-  isAllowed: (origin: string) => Promise<boolean>;
   onLog: (entry: ActionLogEntry) => void;
   maxSteps: number;
 }
@@ -41,25 +39,26 @@ export async function runPlan(
   if (signal.aborted) return { status: 'aborted' };
 
   const history: Message[] = [];
+  let lastUrl = '';
+  let lastTitle = '';
 
   for (let step = 0; step < deps.maxSteps; step += 1) {
     if (signal.aborted) return { status: 'aborted' };
 
-    const currentUrl = await deps.getCurrentUrl();
-    const currentOrigin = safeOrigin(currentUrl);
-    if (!currentOrigin || !(await deps.isAllowed(currentOrigin))) {
-      return { status: 'paused', reason: `Current page (${currentUrl}) is not in the allowlist` };
-    }
-
     const dom = await deps.getDomTree();
+    const annotatedDom = annotateDom(dom, lastUrl, lastTitle);
+    lastUrl = dom.url;
+    lastTitle = dom.title;
 
     let action: AgentAction;
     try {
-      action = await provider.runAgentStep({ plan, history, dom: dom.dom, signal });
+      action = await provider.runAgentStep({ plan, history, dom: annotatedDom, signal });
     } catch (err) {
       if ((err as Error).name === 'AbortError') return { status: 'aborted' };
       return { status: 'error', error: err as Error };
     }
+
+    history.push({ role: 'assistant', content: `ACTION: ${describeAction(action)}` });
 
     if (action.tool === 'finish') {
       deps.onLog(makeLogEntry(action, true, action.summary, 0));
@@ -67,24 +66,21 @@ export async function runPlan(
     }
 
     if (action.tool === 'navigate') {
+      const currentUrl = await deps.getCurrentUrl();
       const targetUrl = resolveUrl(action.url, currentUrl);
-      const targetOrigin = safeOrigin(targetUrl);
-      if (!targetOrigin || !(await deps.isAllowed(targetOrigin))) {
-        return {
-          status: 'paused',
-          reason: `Navigate target ${targetUrl} is not in the allowlist`,
-        };
-      }
 
       const start = Date.now();
       try {
         await deps.navigate(targetUrl);
         deps.onLog(makeLogEntry(action, true, `Navigated to ${targetUrl}`, Date.now() - start));
+        history.push({
+          role: 'user',
+          content: `RESULT: ${JSON.stringify({ ok: true, message: `navigated to ${targetUrl}` })}`,
+        });
       } catch (err) {
         deps.onLog(makeLogEntry(action, false, (err as Error).message, Date.now() - start));
         return { status: 'error', error: err as Error };
       }
-      history.push({ role: 'assistant', content: `[navigate ${targetUrl}]` });
       continue;
     }
 
@@ -99,12 +95,46 @@ export async function runPlan(
       makeLogEntry(action, result.success, result.message ?? result.error ?? '', Date.now() - start),
     );
     history.push({
-      role: 'assistant',
-      content: `[${action.tool} ${result.success ? 'ok' : 'fail'}]`,
+      role: 'user',
+      content: `RESULT: ${JSON.stringify({
+        ok: result.success,
+        message: result.success ? result.message ?? '' : result.error ?? '',
+      })}`,
     });
   }
 
   return { status: 'paused', reason: `Hit step limit (${deps.maxSteps})` };
+}
+
+function annotateDom(
+  dom: { dom: string; url: string; title: string },
+  lastUrl: string,
+  lastTitle: string,
+): string {
+  const lines = [`URL: ${dom.url}`, `TITLE: ${dom.title}`];
+  if (lastUrl && dom.url !== lastUrl) lines.push(`(URL changed from ${lastUrl})`);
+  if (lastTitle && dom.title !== lastTitle) lines.push(`(TITLE changed from ${lastTitle})`);
+  return `${lines.join('\n')}\n\n${dom.dom}`;
+}
+
+function describeAction(action: AgentAction): string {
+  switch (action.tool) {
+    case 'click':
+      return JSON.stringify({ tool: 'click', targetId: action.targetId, rationale: action.rationale });
+    case 'type':
+      return JSON.stringify({
+        tool: 'type',
+        targetId: action.targetId,
+        value: action.value,
+        rationale: action.rationale,
+      });
+    case 'scroll':
+      return JSON.stringify({ tool: 'scroll', direction: action.direction, rationale: action.rationale });
+    case 'navigate':
+      return JSON.stringify({ tool: 'navigate', url: action.url, rationale: action.rationale });
+    case 'finish':
+      return JSON.stringify({ tool: 'finish', summary: action.summary });
+  }
 }
 
 function makeLogEntry(
@@ -125,14 +155,6 @@ function makeLogEntry(
     message,
     durationMs,
   };
-}
-
-function safeOrigin(url: string): string | null {
-  try {
-    return normalizeOrigin(url);
-  } catch {
-    return null;
-  }
 }
 
 function resolveUrl(url: string, base: string): string {

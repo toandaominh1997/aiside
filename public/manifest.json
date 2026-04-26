@@ -18,7 +18,19 @@
     "type": "module"
   },
   "action": {
-    "default_title": "Open aiside"
+    "default_title": "Open aiside",
+    "default_icon": {
+      "16": "logo-16.png",
+      "32": "logo-32.png",
+      "48": "logo-48.png",
+      "128": "logo-128.png"
+    }
+  },
+  "icons": {
+    "16": "logo-16.png",
+    "32": "logo-32.png",
+    "48": "logo-48.png",
+    "128": "logo-128.png"
   },
   "side_panel": {
     "default_path": "index.html"

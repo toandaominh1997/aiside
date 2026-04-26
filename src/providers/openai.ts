@@ -48,6 +48,7 @@ export class OpenAIProvider implements Provider {
       [PROPOSE_PLAN_SCHEMA],
       { type: 'function', function: { name: 'propose_plan' } },
       input.signal,
+      input.onChunk,
     );
     const choice = data.choices?.[0]?.message;
     if (choice?.tool_calls?.[0]?.function) {
@@ -55,6 +56,11 @@ export class OpenAIProvider implements Provider {
       return validatePlan(args);
     }
     if (typeof choice?.content === 'string') {
+      try {
+        return validatePlan(JSON.parse(choice.content));
+      } catch {
+        // Fallback to markdown block parsing
+      }
       const match = choice.content.match(/```json\s*([\s\S]*?)\s*```/);
       if (match) return validatePlan(JSON.parse(match[1]));
     }
@@ -70,7 +76,7 @@ export class OpenAIProvider implements Provider {
         content: `INTERACTIVE ELEMENTS:\n${input.dom}\n\nPick the next tool to call.`,
       },
     ];
-    const data = await this.post(messages, TOOL_SCHEMAS, 'required', input.signal);
+    const data = await this.post(messages, TOOL_SCHEMAS, 'required', input.signal, input.onChunk);
     const choice = data.choices?.[0]?.message;
     const call = choice?.tool_calls?.[0];
     if (call?.function) {
@@ -78,6 +84,12 @@ export class OpenAIProvider implements Provider {
       return toAgentAction(String(call.function.name ?? ''), args);
     }
     if (typeof choice?.content === 'string') {
+      try {
+        const parsed = JSON.parse(choice.content);
+        if (isRecord(parsed) && parsed.tool) return toAgentAction(String(parsed.tool), parsed);
+      } catch {
+        // Fallback to markdown block parsing
+      }
       const match = choice.content.match(/```json\s*([\s\S]*?)\s*```/);
       if (match) {
         const parsed = JSON.parse(match[1]);
@@ -92,11 +104,13 @@ export class OpenAIProvider implements Provider {
     tools: ToolSchema[],
     toolChoice: 'required' | { type: 'function'; function: { name: string } },
     signal: AbortSignal,
+    onChunk?: (chunk: string) => void,
   ): Promise<OpenAIResponse> {
     const url = `${(this.cfg.baseUrl ?? 'https://api.openai.com/v1').replace(/\/$/, '')}/chat/completions`;
     const body = {
       model: this.cfg.model,
       messages,
+      stream: true,
       tools: tools.map((tool) => ({
         type: 'function',
         function: {
@@ -120,6 +134,70 @@ export class OpenAIProvider implements Provider {
       const text = await res.text().catch(() => '');
       throw new Error(`OpenAI API ${res.status}: ${text}`);
     }
+
+    const contentType = res.headers?.get?.('content-type') || '';
+    if (contentType.includes('text/event-stream')) {
+      const reader = res.body?.getReader();
+      const decoder = new TextDecoder();
+      let content = '';
+      const tool_calls: Array<{ function: { name: string; arguments: string } }> = [];
+      let buffer = '';
+
+      if (reader) {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+          for (let line of lines) {
+            line = line.trim();
+            if (line.startsWith('data: ')) {
+              const data = line.slice(6).trim();
+              if (data === '[DONE]') continue;
+              try {
+                const parsed = JSON.parse(data);
+                const delta = parsed.choices?.[0]?.delta;
+                if (delta) {
+                  if (delta.content) {
+                    content += delta.content;
+                    onChunk?.(delta.content);
+                  }
+                  if (delta.tool_calls) {
+                    for (const tc of delta.tool_calls) {
+                      const index = tc.index || 0;
+                      if (!tool_calls[index]) {
+                        tool_calls[index] = { function: { name: '', arguments: '' } };
+                      }
+                      if (tc.function?.name) {
+                        tool_calls[index].function.name += tc.function.name;
+                      }
+                      if (tc.function?.arguments) {
+                        tool_calls[index].function.arguments += tc.function.arguments;
+                        onChunk?.(tc.function.arguments);
+                      }
+                    }
+                  }
+                }
+              } catch {
+                // ignore
+              }
+            }
+          }
+        }
+      }
+      return {
+        choices: [
+          {
+            message: {
+              content: content || undefined,
+              tool_calls: tool_calls.length > 0 ? tool_calls : undefined,
+            },
+          },
+        ],
+      } as OpenAIResponse;
+    }
+
     return res.json() as Promise<OpenAIResponse>;
   }
 

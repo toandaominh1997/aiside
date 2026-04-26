@@ -88,6 +88,7 @@ export class AnthropicProvider implements Provider {
       headers: {
         'Content-Type': 'application/json',
         'x-api-key': this.cfg.apiKey,
+        Authorization: `Bearer ${this.cfg.apiKey}`,
         'anthropic-version': '2023-06-01',
         'anthropic-dangerous-direct-browser-access': 'true',
       },

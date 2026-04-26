@@ -85,13 +85,10 @@ describe('App integration', () => {
     });
 
     render(<App />);
-    fireEvent.change(screen.getByPlaceholderText(/Ask Aiside/i), {
+    fireEvent.change(screen.getByPlaceholderText(/Type \/ for commands/i), {
       target: { value: 'do the thing' },
     });
     fireEvent.click(screen.getByRole('button', { name: /send/i }));
-
-    await waitFor(() => screen.getByRole('button', { name: /approve plan/i }));
-    fireEvent.click(screen.getByRole('button', { name: /approve plan/i }));
 
     await waitFor(() => expect(screen.getAllByText(/done!/i).length).toBeGreaterThan(0), {
       timeout: 3000,

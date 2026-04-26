@@ -27,7 +27,6 @@ const baseDeps = () => ({
   getCurrentUrl: vi.fn().mockResolvedValue('https://x.com'),
   executeAction: vi.fn().mockResolvedValue({ success: true, message: 'done' }),
   navigate: vi.fn().mockResolvedValue(undefined),
-  isAllowed: vi.fn().mockResolvedValue(true),
   onLog: vi.fn(),
   maxSteps: 25,
 });
@@ -46,27 +45,6 @@ describe('agent/loop runPlan', () => {
     expect(result).toMatchObject({ summary: 'all done' });
     expect(deps.executeAction).toHaveBeenCalledTimes(1);
     expect(deps.onLog).toHaveBeenCalledTimes(2);
-  });
-
-  it('pauses on off-allowlist current URL', async () => {
-    const provider = makeProvider([{ tool: 'click', targetId: 1, rationale: 'r' }]);
-    const deps = baseDeps();
-    deps.isAllowed.mockResolvedValueOnce(false);
-    const result = await runPlan(plan, provider, deps, new AbortController().signal);
-    expect(result.status).toBe('paused');
-    expect(result).toMatchObject({ reason: expect.stringMatching(/not in the allowlist/i) });
-    expect(deps.executeAction).not.toHaveBeenCalled();
-  });
-
-  it('pauses on off-allowlist navigate target', async () => {
-    const provider = makeProvider([
-      { tool: 'navigate', url: 'https://forbidden.com', rationale: 'r' },
-    ]);
-    const deps = baseDeps();
-    deps.isAllowed.mockImplementation(async (origin: string) => origin === 'https://x.com');
-    const result = await runPlan(plan, provider, deps, new AbortController().signal);
-    expect(result.status).toBe('paused');
-    expect(deps.navigate).not.toHaveBeenCalled();
   });
 
   it('retries once on stale-element failure', async () => {
@@ -98,6 +76,43 @@ describe('agent/loop runPlan', () => {
     expect(result.status).toBe('paused');
     expect(result).toMatchObject({ reason: expect.stringMatching(/step limit/i) });
     expect(deps.executeAction).toHaveBeenCalledTimes(3);
+  });
+
+  it('feeds prior action + result back into the next runAgentStep call', async () => {
+    const provider = makeProvider([
+      { tool: 'click', targetId: 1, rationale: 'click submit' },
+      { tool: 'finish', summary: 'k' },
+    ]);
+    const deps = baseDeps();
+    deps.executeAction.mockResolvedValueOnce({ success: true, message: 'clicked submit' });
+
+    await runPlan(plan, provider, deps, new AbortController().signal);
+
+    const secondCall = vi.mocked(provider.runAgentStep).mock.calls[1][0];
+    const historyContents = secondCall.history.map((m) => m.content);
+    expect(historyContents[0]).toMatch(/ACTION:.*click.*targetId":1/);
+    expect(historyContents[1]).toMatch(/RESULT:.*"ok":true.*clicked submit/);
+  });
+
+  it('annotates the DOM with URL/title and notes deltas across steps', async () => {
+    const provider = makeProvider([
+      { tool: 'click', targetId: 1, rationale: 'r' },
+      { tool: 'finish', summary: 'k' },
+    ]);
+    const deps = baseDeps();
+    deps.getDomTree
+      .mockResolvedValueOnce({ dom: '<a id="1">go</a>', url: 'https://x.com/a', title: 'A' })
+      .mockResolvedValueOnce({ dom: '<a id="2">x</a>', url: 'https://x.com/b', title: 'B' });
+
+    await runPlan(plan, provider, deps, new AbortController().signal);
+
+    const firstDom = vi.mocked(provider.runAgentStep).mock.calls[0][0].dom;
+    const secondDom = vi.mocked(provider.runAgentStep).mock.calls[1][0].dom;
+    expect(firstDom).toContain('URL: https://x.com/a');
+    expect(firstDom).not.toContain('URL changed');
+    expect(secondDom).toContain('URL: https://x.com/b');
+    expect(secondDom).toContain('URL changed from https://x.com/a');
+    expect(secondDom).toContain('TITLE changed from A');
   });
 
   it('honors AbortSignal', async () => {

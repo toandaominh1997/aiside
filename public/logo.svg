@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <linearGradient id="aiside-bg" x1="8" y1="8" x2="120" y2="120" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fbbf67"/>
+      <stop offset="0.55" stop-color="#e89569"/>
+      <stop offset="1" stop-color="#c25e3c"/>
+    </linearGradient>
+    <linearGradient id="aiside-shine" x1="20" y1="0" x2="60" y2="64" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.25"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="128" height="128" rx="30" fill="url(#aiside-bg)"/>
+  <rect width="128" height="64" rx="30" fill="url(#aiside-shine)"/>
+
+  <!-- left column: three soft dots (the "page" content) -->
+  <circle cx="34" cy="44" r="5.5" fill="#ffffff" fill-opacity="0.95"/>
+  <circle cx="34" cy="64" r="5.5" fill="#ffffff" fill-opacity="0.7"/>
+  <circle cx="34" cy="84" r="5.5" fill="#ffffff" fill-opacity="0.45"/>
+
+  <!-- chevron pointing into the side -->
+  <path
+    d="M 60 32 L 92 64 L 60 96"
+    stroke="#ffffff"
+    stroke-width="14"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    fill="none"
+  />
+</svg>

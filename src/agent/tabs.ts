@@ -38,11 +38,33 @@ export async function navigateAgentTab(tabId: number, url: string): Promise<void
   });
 }
 
-export function sendToAgentTab<T = unknown>(tabId: number, message: unknown): Promise<T> {
+export async function sendToAgentTab<T = unknown>(tabId: number, message: unknown): Promise<T> {
   return new Promise((resolve, reject) => {
     chrome.tabs.sendMessage(tabId, message, (resp: T) => {
       if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
+        const errorMsg = chrome.runtime.lastError.message || '';
+        if (errorMsg.includes('Receiving end does not exist') || errorMsg.includes('Could not establish connection')) {
+          chrome.scripting.executeScript({
+            target: { tabId },
+            files: ['content.js'],
+          }, () => {
+            if (chrome.runtime.lastError) {
+              reject(new Error(`Failed to inject content script: ${chrome.runtime.lastError.message}`));
+              return;
+            }
+            setTimeout(() => {
+              chrome.tabs.sendMessage(tabId, message, (retryResp: T) => {
+                if (chrome.runtime.lastError) {
+                  reject(new Error(chrome.runtime.lastError.message));
+                  return;
+                }
+                resolve(retryResp);
+              });
+            }, 100);
+          });
+        } else {
+          reject(new Error(errorMsg));
+        }
         return;
       }
       resolve(resp);

@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { list as listAllowed, revoke } from './agent/allowlist';
 import './index.css';
 
 type ProviderName = 'anthropic' | 'openai';
@@ -21,14 +20,7 @@ const Options = () => {
   const [baseUrl, setBaseUrl] = useState(DEFAULT_BASE_URLS.anthropic);
   const [model, setModel] = useState('claude-opus-4-7');
   const [sendScreenshots, setSendScreenshots] = useState(false);
-  const [allowed, setAllowed] = useState<
-    Array<{ origin: string; addedAt: number; lastUsedAt: number }>
-  >([]);
   const [saved, setSaved] = useState(false);
-
-  const refreshAllowed = async () => {
-    setAllowed(await listAllowed());
-  };
 
   useEffect(() => {
     chrome.storage.local.get(
@@ -43,7 +35,6 @@ const Options = () => {
         setSendScreenshots(Boolean(result.sendScreenshots));
       },
     );
-    void listAllowed().then((entries) => setAllowed(entries));
   }, []);
 
   const visionSupported = VISION_PREFIXES[provider].some((prefix) =>
@@ -66,19 +57,6 @@ const Options = () => {
     ) {
       setBaseUrl(DEFAULT_BASE_URLS[nextProvider]);
     }
-  };
-
-  const handleRevoke = async (origin: string) => {
-    await revoke(origin);
-    await refreshAllowed();
-  };
-
-  const handleRevokeAll = async () => {
-    if (!confirm('Revoke all site permissions?')) return;
-    for (const entry of allowed) {
-      await revoke(entry.origin);
-    }
-    await refreshAllowed();
   };
 
   return (
@@ -182,48 +160,6 @@ const Options = () => {
               Send screenshots to model (more accurate, ~2x cost)
             </span>
           </label>
-        </section>
-
-        <section className="space-y-2">
-          <h2 className="text-sm font-semibold uppercase text-gray-500">Site permissions</h2>
-          {allowed.length === 0 ? (
-            <p className="text-sm text-gray-500">
-              Aiside hasn't been approved to act on any sites yet.
-            </p>
-          ) : (
-            <>
-              <ul className="divide-y divide-gray-200 border border-gray-200 rounded-md">
-                {allowed.map((entry) => (
-                  <li
-                    key={entry.origin}
-                    className="flex items-center justify-between gap-3 px-3 py-2 text-sm"
-                  >
-                    <div>
-                      <div className="font-medium break-all">{entry.origin}</div>
-                      <div className="text-xs text-gray-500">
-                        added {new Date(entry.addedAt).toLocaleDateString()} - last used{' '}
-                        {entry.lastUsedAt ? new Date(entry.lastUsedAt).toLocaleDateString() : 'never'}
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => handleRevoke(entry.origin)}
-                      className="text-red-600 text-xs font-medium hover:underline"
-                    >
-                      Revoke
-                    </button>
-                  </li>
-                ))}
-              </ul>
-              <button
-                type="button"
-                onClick={handleRevokeAll}
-                className="text-xs text-red-600 hover:underline"
-              >
-                Revoke all
-              </button>
-            </>
-          )}
         </section>
       </div>
     </div>
