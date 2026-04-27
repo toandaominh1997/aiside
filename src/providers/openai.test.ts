@@ -98,7 +98,75 @@ describe('OpenAIProvider', () => {
       dom: '<button id="7">Go</button>',
       signal: new AbortController().signal,
     });
-    expect(action).toEqual({ tool: 'click', targetId: 7, rationale: 'cuz' });
+    expect(action).toEqual({ tool: 'click', targetId: 7, target: undefined, rationale: 'cuz' });
+  });
+
+  it('parses mention-target click and power tools', async () => {
+    const cases = [
+      {
+        name: 'click',
+        args: { target: '@button-submit-0', rationale: 'mentioned' },
+        expected: { tool: 'click', targetId: undefined, target: '@button-submit-0', rationale: 'mentioned' },
+      },
+      {
+        name: 'press_key',
+        args: { key: 'Enter', rationale: 'toggle focused checkbox' },
+        expected: { tool: 'press_key', key: 'Enter', rationale: 'toggle focused checkbox' },
+      },
+      {
+        name: 'type_text',
+        args: { value: 'hello', rationale: 'type into focused editor' },
+        expected: { tool: 'type_text', value: 'hello', rationale: 'type into focused editor' },
+      },
+      {
+        name: 'wait',
+        args: { ms: 500, rationale: 'loading' },
+        expected: { tool: 'wait', ms: 500, rationale: 'loading' },
+      },
+      {
+        name: 'remember',
+        args: { key: 'page', value: 'pricing', rationale: 'use later' },
+        expected: { tool: 'remember', key: 'page', value: 'pricing', rationale: 'use later' },
+      },
+      {
+        name: 'recall',
+        args: { key: 'page', rationale: 'need context' },
+        expected: { tool: 'recall', key: 'page', rationale: 'need context' },
+      },
+      {
+        name: 'get_network_failures',
+        args: { rationale: 'debug' },
+        expected: { tool: 'get_network_failures', rationale: 'debug' },
+      },
+    ];
+
+    for (const testCase of cases) {
+      mockFetchOnce({
+        choices: [
+          {
+            message: {
+              tool_calls: [
+                {
+                  function: {
+                    name: testCase.name,
+                    arguments: JSON.stringify(testCase.args),
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      });
+      const provider = new OpenAIProvider(config);
+      await expect(
+        provider.runAgentStep({
+          plan: { summary: 's', steps: ['a'], sites: ['https://x.com'] },
+          history: [],
+          dom: '<button id="7">Go</button>',
+          signal: new AbortController().signal,
+        }),
+      ).resolves.toEqual(testCase.expected);
+    }
   });
 
   it('throws when API responds non-OK', async () => {

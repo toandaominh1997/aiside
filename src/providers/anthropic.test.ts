@@ -49,7 +49,62 @@ describe('AnthropicProvider', () => {
       dom: '<button id="3">x</button>',
       signal: new AbortController().signal,
     });
-    expect(action).toEqual({ tool: 'click', targetId: 3, rationale: 'because' });
+    expect(action).toEqual({ tool: 'click', targetId: 3, target: undefined, rationale: 'because' });
+  });
+
+  it('parses mention-target click and power tools', async () => {
+    const cases = [
+      {
+        name: 'click',
+        input: { target: '@button-submit-0', rationale: 'mentioned' },
+        expected: { tool: 'click', targetId: undefined, target: '@button-submit-0', rationale: 'mentioned' },
+      },
+      {
+        name: 'click_at',
+        input: { x: 120, y: 240, rationale: 'visual checkbox' },
+        expected: { tool: 'click_at', x: 120, y: 240, rationale: 'visual checkbox' },
+      },
+      {
+        name: 'hotkey',
+        input: { keys: ['Meta', 'K'], rationale: 'open command palette' },
+        expected: { tool: 'hotkey', keys: ['Meta', 'K'], rationale: 'open command palette' },
+      },
+      {
+        name: 'wait',
+        input: { ms: 500, rationale: 'loading' },
+        expected: { tool: 'wait', ms: 500, rationale: 'loading' },
+      },
+      {
+        name: 'remember',
+        input: { key: 'page', value: 'pricing', rationale: 'use later' },
+        expected: { tool: 'remember', key: 'page', value: 'pricing', rationale: 'use later' },
+      },
+      {
+        name: 'recall',
+        input: { key: 'page', rationale: 'need context' },
+        expected: { tool: 'recall', key: 'page', rationale: 'need context' },
+      },
+      {
+        name: 'get_console_errors',
+        input: { rationale: 'debug' },
+        expected: { tool: 'get_console_errors', rationale: 'debug' },
+      },
+    ];
+
+    for (const testCase of cases) {
+      mockFetchOnce({
+        content: [{ type: 'tool_use', name: testCase.name, input: testCase.input }],
+      });
+      const provider = new AnthropicProvider(config);
+      await expect(
+        provider.runAgentStep({
+          plan: { summary: 's', steps: ['a'], sites: ['https://x.com'] },
+          history: [],
+          dom: '<button id="3">x</button>',
+          signal: new AbortController().signal,
+        }),
+      ).resolves.toEqual(testCase.expected);
+    }
   });
 
   it('sends required headers', async () => {
@@ -106,6 +161,92 @@ describe('AnthropicProvider', () => {
       signal: new AbortController().signal,
     });
     expect(fetchSpy.mock.calls[0][0]).toBe('https://anthropic-proxy.test/v1/messages');
+  });
+
+  it('translates ACTION/RESULT history into native tool_use/tool_result blocks', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => '{}',
+      json: async () => ({
+        content: [{ type: 'tool_use', id: 'srv-1', name: 'finish', input: { summary: 'k' } }],
+      }),
+    });
+    global.fetch = fetchSpy;
+    const provider = new AnthropicProvider(config);
+    await provider.runAgentStep({
+      plan: { summary: 's', steps: ['a'], sites: ['https://x.com'] },
+      history: [
+        { role: 'user', content: 'find books' },
+        { role: 'assistant', content: 'ACTION: {"tool":"click","targetId":1,"rationale":"r"}' },
+        { role: 'user', content: 'RESULT: {"ok":true,"message":"clicked"}' },
+      ],
+      dom: '<button id="1">x</button>',
+      signal: new AbortController().signal,
+    });
+    const body = JSON.parse((fetchSpy.mock.calls[0][1] as RequestInit).body as string);
+    const messages = body.messages as Array<{ role: string; content: unknown }>;
+    const assistant = messages.find((m) => m.role === 'assistant');
+    expect(assistant?.content).toMatchObject([
+      { type: 'tool_use', name: 'click', input: expect.objectContaining({ targetId: 1 }) },
+    ]);
+    const toolResult = messages.find(
+      (m) => Array.isArray(m.content) && (m.content as Array<{ type: string }>).some((b) => b.type === 'tool_result'),
+    );
+    expect(toolResult).toBeTruthy();
+    expect(body.tools.at(-1)).toMatchObject({ cache_control: { type: 'ephemeral' } });
+  });
+
+  it('parses read_page and find_in_page tool calls', async () => {
+    mockFetchOnce({
+      content: [{ type: 'tool_use', name: 'read_page', input: { rationale: 'reading' } }],
+    });
+    let provider = new AnthropicProvider(config);
+    await expect(
+      provider.runAgentStep({
+        plan: { summary: 's', steps: ['a'], sites: ['https://x.com'] },
+        history: [],
+        dom: '',
+        signal: new AbortController().signal,
+      }),
+    ).resolves.toEqual({ tool: 'read_page', rationale: 'reading' });
+
+    mockFetchOnce({
+      content: [
+        { type: 'tool_use', name: 'find_in_page', input: { query: 'pricing', limit: 3, rationale: 'r' } },
+      ],
+    });
+    provider = new AnthropicProvider(config);
+    await expect(
+      provider.runAgentStep({
+        plan: { summary: 's', steps: ['a'], sites: ['https://x.com'] },
+        history: [],
+        dom: '',
+        signal: new AbortController().signal,
+      }),
+    ).resolves.toEqual({ tool: 'find_in_page', query: 'pricing', limit: 3, rationale: 'r' });
+  });
+
+  it('parses string targetId for click', async () => {
+    mockFetchOnce({
+      content: [
+        { type: 'tool_use', name: 'click', input: { targetId: 'button-submit-3a4f', rationale: 'r' } },
+      ],
+    });
+    const provider = new AnthropicProvider(config);
+    await expect(
+      provider.runAgentStep({
+        plan: { summary: 's', steps: ['a'], sites: ['https://x.com'] },
+        history: [],
+        dom: '',
+        signal: new AbortController().signal,
+      }),
+    ).resolves.toEqual({
+      tool: 'click',
+      targetId: 'button-submit-3a4f',
+      target: undefined,
+      rationale: 'r',
+    });
   });
 
   it('throws on non-OK response', async () => {

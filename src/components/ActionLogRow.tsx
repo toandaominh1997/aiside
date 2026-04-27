@@ -47,13 +47,41 @@ export function ActionLogRow({ entry }: Props) {
 function summarize(entry: ActionLogEntry): string {
   switch (entry.tool) {
     case 'click':
-      return `id=${entry.args.targetId}`;
-    case 'type':
-      return `id=${entry.args.targetId} "${entry.args.value}"`;
+      return entry.args.target ? String(entry.args.target) : `id=${entry.args.targetId}`;
+    case 'type': {
+      const target = entry.args.target ? String(entry.args.target) : `id=${entry.args.targetId}`;
+      return `${target} "${entry.args.value}"`;
+    }
     case 'navigate':
       return String(entry.args.url);
     case 'scroll':
       return String(entry.args.direction);
+    case 'screenshot':
+      return 'capture visible tab';
+    case 'get_console_errors':
+      return 'console errors';
+    case 'get_network_failures':
+      return 'network/resource failures';
+    case 'wait':
+      return `${entry.args.ms}ms`;
+    case 'observe':
+      return 'page snapshot';
+    case 'remember':
+      return String(entry.args.key);
+    case 'recall':
+      return entry.args.key ? String(entry.args.key) : 'all memory';
+    case 'click_at':
+      return `(${entry.args.x}, ${entry.args.y})`;
+    case 'press_key':
+      return String(entry.args.key);
+    case 'hotkey':
+      return Array.isArray(entry.args.keys) ? (entry.args.keys as string[]).join('+') : '';
+    case 'type_text':
+      return `"${entry.args.value}"`;
+    case 'read_page':
+      return 'read article';
+    case 'find_in_page':
+      return `"${entry.args.query}"`;
     case 'finish':
       return entry.message;
   }

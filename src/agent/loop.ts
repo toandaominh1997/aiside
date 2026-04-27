@@ -11,16 +11,42 @@ export interface ActionLogEntry {
   durationMs: number;
 }
 
+export type PermissionMode = 'read-only' | 'ask' | 'auto';
+export type PermissionVerdict = 'allow' | 'deny' | 'ask';
+
+const DESTRUCTIVE_TOOLS: ReadonlySet<AgentAction['tool']> = new Set([
+  'click',
+  'type',
+  'click_at',
+  'press_key',
+  'hotkey',
+  'type_text',
+  'navigate',
+]);
+
+export function isDestructive(tool: AgentAction['tool']): boolean {
+  return DESTRUCTIVE_TOOLS.has(tool);
+}
+
 export interface LoopDeps {
   agentTabId: number;
   getDomTree: () => Promise<{ dom: string; url: string; title: string }>;
   getCurrentUrl: () => Promise<string>;
   executeAction: (
     action: AgentAction,
-  ) => Promise<{ success: boolean; message?: string; error?: string }>;
+  ) => Promise<{ success: boolean; message?: string; error?: string; data?: unknown }>;
   navigate: (url: string) => Promise<void>;
+  captureScreenshot?: () => Promise<string | undefined>;
+  includeScreenshots?: boolean;
   onLog: (entry: ActionLogEntry) => void;
   maxSteps: number;
+  initialMessages?: Message[];
+  isOriginAllowed?: (origin: string) => boolean;
+  onAllowlistTouch?: (origin: string) => void;
+  permissionMode?: PermissionMode;
+  checkPermission?: (origin: string, action: AgentAction) => PermissionVerdict;
+  onPermissionDecision?: (origin: string, action: AgentAction, decision: 'once' | 'always') => void;
+  requestPermission?: (origin: string, action: AgentAction) => Promise<'once' | 'always' | 'deny'>;
 }
 
 export type LoopResult =
@@ -38,7 +64,7 @@ export async function runPlan(
   void deps.agentTabId;
   if (signal.aborted) return { status: 'aborted' };
 
-  const history: Message[] = [];
+  const history: Message[] = deps.initialMessages ? [...deps.initialMessages] : [];
   let lastUrl = '';
   let lastTitle = '';
 
@@ -46,19 +72,61 @@ export async function runPlan(
     if (signal.aborted) return { status: 'aborted' };
 
     const dom = await deps.getDomTree();
+    if (deps.isOriginAllowed) {
+      const origin = safeOrigin(dom.url);
+      if (origin && !deps.isOriginAllowed(origin)) {
+        const reason = `Page is on off-allowlist origin ${origin}`;
+        return { status: 'paused', reason };
+      }
+      if (origin) deps.onAllowlistTouch?.(origin);
+    }
     const annotatedDom = annotateDom(dom, lastUrl, lastTitle);
     lastUrl = dom.url;
     lastTitle = dom.title;
 
     let action: AgentAction;
     try {
-      action = await provider.runAgentStep({ plan, history, dom: annotatedDom, signal });
+      const screenshot = deps.includeScreenshots ? await deps.captureScreenshot?.() : undefined;
+      action = await provider.runAgentStep({ plan, history, dom: annotatedDom, screenshot, signal });
     } catch (err) {
       if ((err as Error).name === 'AbortError') return { status: 'aborted' };
       return { status: 'error', error: err as Error };
     }
 
     history.push({ role: 'assistant', content: `ACTION: ${describeAction(action)}` });
+
+    if (deps.permissionMode === 'read-only' && isDestructive(action.tool)) {
+      const reason = `Read-only mode blocked tool ${action.tool}`;
+      deps.onLog(makeLogEntry(action, false, reason, 0));
+      history.push({
+        role: 'user',
+        content: `RESULT: ${JSON.stringify({ ok: false, message: reason })}`,
+      });
+      continue;
+    }
+
+    if (deps.permissionMode === 'ask' && isDestructive(action.tool)) {
+      const origin = safeOrigin(lastUrl) ?? '';
+      const verdict = deps.checkPermission?.(origin, action) ?? 'ask';
+      if (verdict === 'deny') {
+        const reason = `Permission denied for ${action.tool} on ${origin || 'unknown'}`;
+        deps.onLog(makeLogEntry(action, false, reason, 0));
+        history.push({
+          role: 'user',
+          content: `RESULT: ${JSON.stringify({ ok: false, message: reason })}`,
+        });
+        continue;
+      }
+      if (verdict === 'ask') {
+        const decision = (await deps.requestPermission?.(origin, action)) ?? 'deny';
+        if (decision === 'deny') {
+          const reason = `User denied ${action.tool} on ${origin || 'unknown'}`;
+          deps.onLog(makeLogEntry(action, false, reason, 0));
+          return { status: 'paused', reason };
+        }
+        deps.onPermissionDecision?.(origin, action, decision);
+      }
+    }
 
     if (action.tool === 'finish') {
       deps.onLog(makeLogEntry(action, true, action.summary, 0));
@@ -68,6 +136,16 @@ export async function runPlan(
     if (action.tool === 'navigate') {
       const currentUrl = await deps.getCurrentUrl();
       const targetUrl = resolveUrl(action.url, currentUrl);
+
+      if (deps.isOriginAllowed) {
+        const targetOrigin = safeOrigin(targetUrl);
+        if (!targetOrigin || !deps.isOriginAllowed(targetOrigin)) {
+          const reason = `Off-allowlist navigation to ${targetOrigin ?? targetUrl}`;
+          deps.onLog(makeLogEntry(action, false, reason, 0));
+          return { status: 'paused', reason };
+        }
+        deps.onAllowlistTouch?.(targetOrigin);
+      }
 
       const start = Date.now();
       try {
@@ -81,6 +159,38 @@ export async function runPlan(
         deps.onLog(makeLogEntry(action, false, (err as Error).message, Date.now() - start));
         return { status: 'error', error: err as Error };
       }
+      continue;
+    }
+
+    if (action.tool === 'wait') {
+      const ms = clampWaitMs(action.ms);
+      const start = Date.now();
+      try {
+        await waitFor(ms, signal);
+      } catch (err) {
+        if ((err as Error).name === 'AbortError') return { status: 'aborted' };
+        return { status: 'error', error: err as Error };
+      }
+      const message = `Waited ${ms}ms`;
+      deps.onLog(makeLogEntry(action, true, message, Date.now() - start));
+      history.push({ role: 'user', content: `RESULT: ${JSON.stringify({ ok: true, message })}` });
+      continue;
+    }
+
+    if (action.tool === 'screenshot') {
+      const start = Date.now();
+      const screenshot = await deps.captureScreenshot?.();
+      const ok = Boolean(screenshot);
+      const message = ok ? 'Captured screenshot' : 'Screenshot capture unavailable';
+      deps.onLog(makeLogEntry(action, ok, message, Date.now() - start));
+      history.push({
+        role: 'user',
+        content: `RESULT: ${JSON.stringify({
+          ok,
+          message,
+          screenshot: screenshot ? '[base64 screenshot captured]' : undefined,
+        })}`,
+      });
       continue;
     }
 
@@ -99,6 +209,7 @@ export async function runPlan(
       content: `RESULT: ${JSON.stringify({
         ok: result.success,
         message: result.success ? result.message ?? '' : result.error ?? '',
+        data: result.data,
       })}`,
     });
   }
@@ -120,11 +231,12 @@ function annotateDom(
 function describeAction(action: AgentAction): string {
   switch (action.tool) {
     case 'click':
-      return JSON.stringify({ tool: 'click', targetId: action.targetId, rationale: action.rationale });
+      return JSON.stringify({ tool: 'click', targetId: action.targetId, target: action.target, rationale: action.rationale });
     case 'type':
       return JSON.stringify({
         tool: 'type',
         targetId: action.targetId,
+        target: action.target,
         value: action.value,
         rationale: action.rationale,
       });
@@ -132,6 +244,37 @@ function describeAction(action: AgentAction): string {
       return JSON.stringify({ tool: 'scroll', direction: action.direction, rationale: action.rationale });
     case 'navigate':
       return JSON.stringify({ tool: 'navigate', url: action.url, rationale: action.rationale });
+    case 'screenshot':
+      return JSON.stringify({ tool: 'screenshot', rationale: action.rationale });
+    case 'get_console_errors':
+      return JSON.stringify({ tool: 'get_console_errors', rationale: action.rationale });
+    case 'get_network_failures':
+      return JSON.stringify({ tool: 'get_network_failures', rationale: action.rationale });
+    case 'wait':
+      return JSON.stringify({ tool: 'wait', ms: action.ms, rationale: action.rationale });
+    case 'observe':
+      return JSON.stringify({ tool: 'observe', rationale: action.rationale });
+    case 'read_page':
+      return JSON.stringify({ tool: 'read_page', rationale: action.rationale });
+    case 'find_in_page':
+      return JSON.stringify({
+        tool: 'find_in_page',
+        query: action.query,
+        limit: action.limit,
+        rationale: action.rationale,
+      });
+    case 'remember':
+      return JSON.stringify({ tool: 'remember', key: action.key, value: action.value, rationale: action.rationale });
+    case 'recall':
+      return JSON.stringify({ tool: 'recall', key: action.key, rationale: action.rationale });
+    case 'click_at':
+      return JSON.stringify({ tool: 'click_at', x: action.x, y: action.y, rationale: action.rationale });
+    case 'press_key':
+      return JSON.stringify({ tool: 'press_key', key: action.key, rationale: action.rationale });
+    case 'hotkey':
+      return JSON.stringify({ tool: 'hotkey', keys: action.keys, rationale: action.rationale });
+    case 'type_text':
+      return JSON.stringify({ tool: 'type_text', value: action.value, rationale: action.rationale });
     case 'finish':
       return JSON.stringify({ tool: 'finish', summary: action.summary });
   }
@@ -157,10 +300,43 @@ function makeLogEntry(
   };
 }
 
+function clampWaitMs(ms: number): number {
+  if (!Number.isFinite(ms)) return 1000;
+  return Math.min(10000, Math.max(100, Math.round(ms)));
+}
+
+function waitFor(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new DOMException('Aborted', 'AbortError'));
+      return;
+    }
+    const timeout = globalThis.setTimeout(resolve, ms);
+    signal.addEventListener(
+      'abort',
+      () => {
+        globalThis.clearTimeout(timeout);
+        reject(new DOMException('Aborted', 'AbortError'));
+      },
+      { once: true },
+    );
+  });
+}
+
 function resolveUrl(url: string, base: string): string {
   try {
     return new URL(url, base).toString();
   } catch {
     return url;
+  }
+}
+
+function safeOrigin(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+    return `${parsed.protocol}//${parsed.host.toLowerCase()}`;
+  } catch {
+    return null;
   }
 }

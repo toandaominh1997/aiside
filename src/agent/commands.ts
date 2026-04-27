@@ -8,41 +8,42 @@ export interface SlashCommand {
 export const SLASH_COMMANDS: SlashCommand[] = [
   {
     name: 'summarize',
-    description: 'Summarize the current page',
-    expand: () => 'Summarize the current page in 5 concise bullet points.',
+    description: 'Summarize this page for the current task',
+    expand: () =>
+      'Summarize the current page in the way that is most useful for AISide: identify what this page is, the important content or state visible now, key details the user may care about, and any likely next actions available on the page. Use headings or bullets as appropriate. Do not click, type, navigate, submit forms, or change page state.',
   },
   {
     name: 'extract',
-    description: 'Pull structured data (e.g. /extract emails)',
+    description: 'Extract structured data from this page',
     expand: (arg) =>
       arg
-        ? `Extract ${arg} from the current page and return a clean, deduplicated list.`
-        : 'Extract the key structured data from the current page (links, headings, prices, dates) as a clean list.',
+        ? `Extract ${arg} from the current page. Return clean, deduplicated results in a structured list or table, include nearby context when useful, and say if nothing relevant is found.`
+        : 'Extract the most useful structured data from the current page, such as links, headings, prices, dates, names, emails, tables, and calls to action. Return clean, deduplicated results grouped by type.',
   },
   {
     name: 'find',
-    description: 'Find something on the page (e.g. /find pricing)',
+    description: 'Find text or sections and show context',
     expand: (arg) =>
       arg
-        ? `Find "${arg}" on the current page. Scroll to it and report the surrounding context.`
-        : 'Find the most relevant section on the current page and report the surrounding context.',
+        ? `Find "${arg}" on the current page. Use page search/read tools first, scroll to the best match if helpful, and report the surrounding context plus where it appears.`
+        : 'Find the most relevant section on the current page for the user\'s likely task. Use page search/read tools first, scroll if helpful, and report the surrounding context plus where it appears.',
   },
   {
     name: 'ask',
-    description: 'Answer without taking browser actions',
+    description: 'Answer from the page without acting',
     expand: (arg) =>
       arg
-        ? `Answer based on the current page without taking any browser actions: ${arg}`
-        : 'Answer based on the current page without taking any browser actions.',
+        ? `Answer this using only the current page context, without clicking, typing, navigating, or changing page state: ${arg}`
+        : 'Answer using only the current page context. Do not click, type, navigate, submit forms, or change page state.',
   },
   {
     name: 'new',
-    description: 'Start a new chat',
+    description: 'Clear the conversation and start fresh',
     local: 'new',
   },
   {
     name: 'help',
-    description: 'Show available commands',
+    description: 'Show all commands and what they do',
     local: 'help',
   },
 ];

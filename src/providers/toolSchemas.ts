@@ -37,27 +37,33 @@ export const PROPOSE_PLAN_SCHEMA: ToolSchema = {
 export const TOOL_SCHEMAS: ToolSchema[] = [
   {
     name: 'click',
-    description: 'Click an interactive element by its numeric id from the simplified DOM.',
+    description:
+      'Click an interactive element by id (string data-aid or numeric id from the simplified DOM), or by an @ mention token from the user.',
     input_schema: {
       type: 'object',
       properties: {
-        targetId: { type: 'number', description: 'The numeric id of the element.' },
+        targetId: {
+          type: ['string', 'number'],
+          description: 'The data-aid string or numeric id of the element.',
+        },
+        target: { type: 'string', description: 'An @ mention token or mention id for a page element.' },
         rationale: { type: 'string', description: 'Why this click is the right next step.' },
       },
-      required: ['targetId', 'rationale'],
+      required: ['rationale'],
     },
   },
   {
     name: 'type',
-    description: 'Type text into an input or textarea element by id.',
+    description: 'Type text into an input or textarea by id (string data-aid or numeric id), or by an @ mention token.',
     input_schema: {
       type: 'object',
       properties: {
-        targetId: { type: 'number' },
+        targetId: { type: ['string', 'number'] },
+        target: { type: 'string', description: 'An @ mention token or mention id for a page element.' },
         value: { type: 'string', description: 'Text to type.' },
         rationale: { type: 'string' },
       },
-      required: ['targetId', 'value', 'rationale'],
+      required: ['value', 'rationale'],
     },
   },
   {
@@ -82,6 +88,162 @@ export const TOOL_SCHEMAS: ToolSchema[] = [
         rationale: { type: 'string' },
       },
       required: ['direction', 'rationale'],
+    },
+  },
+  {
+    name: 'click_at',
+    description: 'Click viewport/client coordinates from the visible tab screenshot using document.elementFromPoint.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        x: { type: 'number', description: 'Viewport x coordinate in CSS pixels.' },
+        y: { type: 'number', description: 'Viewport y coordinate in CSS pixels.' },
+        rationale: { type: 'string' },
+      },
+      required: ['x', 'y', 'rationale'],
+    },
+  },
+  {
+    name: 'press_key',
+    description: 'Press a single key on the focused page element or document body.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        key: { type: 'string', description: 'Key value such as Enter, Tab, ArrowDown, Escape, or a letter.' },
+        rationale: { type: 'string' },
+      },
+      required: ['key', 'rationale'],
+    },
+  },
+  {
+    name: 'hotkey',
+    description: 'Press a keyboard shortcut on the focused page element, such as Meta+K or Control+L.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        keys: { type: 'array', items: { type: 'string' }, description: 'Keys in the combo, e.g. ["Meta", "K"].' },
+        rationale: { type: 'string' },
+      },
+      required: ['keys', 'rationale'],
+    },
+  },
+  {
+    name: 'type_text',
+    description: 'Type text into the currently focused input, textarea, or contenteditable element.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        value: { type: 'string', description: 'Text to type.' },
+        rationale: { type: 'string' },
+      },
+      required: ['value', 'rationale'],
+    },
+  },
+  {
+    name: 'screenshot',
+    description: 'Capture the visible tab to inspect visual page state.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        rationale: { type: 'string' },
+      },
+      required: ['rationale'],
+    },
+  },
+  {
+    name: 'get_console_errors',
+    description: 'Read console errors and unhandled page errors captured by AISide.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        rationale: { type: 'string' },
+      },
+      required: ['rationale'],
+    },
+  },
+  {
+    name: 'get_network_failures',
+    description: 'Read network and resource failures captured by AISide.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        rationale: { type: 'string' },
+      },
+      required: ['rationale'],
+    },
+  },
+  {
+    name: 'wait',
+    description: 'Wait briefly for async page changes. Use 100-10000 milliseconds.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        ms: { type: 'number', description: 'Milliseconds to wait, clamped to 100-10000.' },
+        rationale: { type: 'string' },
+      },
+      required: ['ms', 'rationale'],
+    },
+  },
+  {
+    name: 'observe',
+    description: 'Observe the current page URL, title, DOM, diagnostics, and page memory.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        rationale: { type: 'string' },
+      },
+      required: ['rationale'],
+    },
+  },
+  {
+    name: 'remember',
+    description: 'Store a short page-local fact for this agent run.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        key: { type: 'string', description: 'Short stable memory key.' },
+        value: { type: 'string', description: 'Short fact to remember.' },
+        rationale: { type: 'string' },
+      },
+      required: ['key', 'value', 'rationale'],
+    },
+  },
+  {
+    name: 'recall',
+    description: 'Recall one page-local fact by key, or all page-local memory when key is omitted.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        key: { type: 'string', description: 'Optional memory key.' },
+        rationale: { type: 'string' },
+      },
+      required: ['rationale'],
+    },
+  },
+  {
+    name: 'read_page',
+    description:
+      'Read the current page as cleaned-up Markdown (Readability-style). Use to understand article content before acting.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        rationale: { type: 'string' },
+      },
+      required: ['rationale'],
+    },
+  },
+  {
+    name: 'find_in_page',
+    description:
+      'Search the current page for a substring. Returns up to `limit` matches with surrounding context and scrolls the first match into view.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Substring to search for.' },
+        limit: { type: 'number', description: 'Max number of matches to return. Default 5.' },
+        rationale: { type: 'string' },
+      },
+      required: ['query', 'rationale'],
     },
   },
   {

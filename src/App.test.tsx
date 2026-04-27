@@ -14,7 +14,7 @@ vi.mock('./agent/tabs', () => ({
   onAgentTabClosed: vi.fn().mockReturnValue(() => {}),
 }));
 
-import { sendToAgentTab } from './agent/tabs';
+import { sendToAgentTab, onAgentTabClosed, getAgentTabUrl, navigateAgentTab } from './agent/tabs';
 import { selectProvider } from './providers/index';
 import type { Provider } from './providers/types';
 
@@ -53,6 +53,9 @@ describe('App integration', () => {
       if (callback) callback(tabs);
       return Promise.resolve(tabs);
     }) as typeof chrome.tabs.query);
+    vi.mocked(getAgentTabUrl).mockResolvedValue('https://example.com');
+    vi.mocked(navigateAgentTab).mockResolvedValue(undefined);
+    vi.mocked(onAgentTabClosed).mockReturnValue(() => {});
     window.HTMLElement.prototype.scrollIntoView = vi.fn();
   });
 
@@ -85,14 +88,115 @@ describe('App integration', () => {
     });
 
     render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: /Act without asking/i }));
+    fireEvent.click(screen.getByRole('option', { name: /Ask before acting/i }));
     fireEvent.change(screen.getByPlaceholderText(/Type \/ for commands/i), {
       target: { value: 'do the thing' },
     });
     fireEvent.click(screen.getByRole('button', { name: /send/i }));
 
+    const approveButton = await screen.findByRole('button', { name: /Approve plan/i }, { timeout: 3000 });
+    fireEvent.click(approveButton);
+
     await waitFor(() => expect(screen.getAllByText(/done!/i).length).toBeGreaterThan(0), {
       timeout: 3000,
     });
     expect(fakeProvider.runAgentStep).toHaveBeenCalledTimes(2);
+    expect(sendToAgentTab).toHaveBeenCalledWith(1, expect.objectContaining({ type: 'GET_DOM_TREE' }));
+  });
+
+  it('seeds initial messages with the user prompt', async () => {
+    const fakeProvider = {
+      proposePlan: vi.fn().mockResolvedValue({
+        summary: 'do',
+        steps: ['s1'],
+        sites: ['https://example.com'],
+      }),
+      runAgentStep: vi.fn().mockResolvedValue({ tool: 'finish', summary: 'done!' }),
+    };
+    vi.mocked(selectProvider).mockReturnValue(fakeProvider as Provider);
+    vi.mocked(sendToAgentTab).mockImplementation(async (_tabId, message) => {
+      if ((message as { type?: string }).type === 'GET_DOM_TREE') {
+        return { dom: '<button id="1">x</button>', url: 'https://example.com', title: 'Ex' };
+      }
+      return { success: true, message: 'ok' };
+    });
+
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: /Act without asking/i }));
+    fireEvent.click(screen.getByRole('option', { name: /Ask before acting/i }));
+    fireEvent.change(screen.getByPlaceholderText(/Type \/ for commands/i), {
+      target: { value: 'find me books' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /send/i }));
+    const approve = await screen.findByRole('button', { name: /Approve plan/i });
+    fireEvent.click(approve);
+
+    await waitFor(() => expect(fakeProvider.runAgentStep).toHaveBeenCalled());
+    const firstCall = fakeProvider.runAgentStep.mock.calls[0][0] as { history: Array<{ content: string }> };
+    expect(firstCall.history.some((m) => m.content.includes('find me books'))).toBe(true);
+  });
+
+  it('declining a plan returns the user to the input draft', async () => {
+    const fakeProvider = {
+      proposePlan: vi.fn().mockResolvedValue({ summary: 'do', steps: ['s1'], sites: ['https://example.com'] }),
+      runAgentStep: vi.fn(),
+    };
+    vi.mocked(selectProvider).mockReturnValue(fakeProvider as Provider);
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: /Act without asking/i }));
+    fireEvent.click(screen.getByRole('option', { name: /Ask before acting/i }));
+    fireEvent.change(screen.getByPlaceholderText(/Type \/ for commands/i), {
+      target: { value: 'do thing' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /send/i }));
+    const makeChanges = await screen.findByRole('button', { name: /Make changes/i });
+    fireEvent.click(makeChanges);
+    await waitFor(() => {
+      const textarea = screen.getByPlaceholderText(/Type \/ for commands/i) as HTMLTextAreaElement;
+      expect(textarea.value).toContain('do thing');
+    });
+    expect(fakeProvider.runAgentStep).not.toHaveBeenCalled();
+  });
+
+  it('auto mode runs without a plan card on already approved auto sites', async () => {
+    mockStorage({
+      provider: 'anthropic',
+      apiKey: 'k',
+      model: 'claude-opus-4-7',
+      baseUrl: 'https://api.openai.com/v1',
+      chatHistory: [],
+      siteAllowlist: {
+        version: 1,
+        origins: {
+          'https://example.com': {
+            addedAt: Date.now(),
+            lastUsedAt: Date.now(),
+            modes: { act: 'auto' },
+          },
+        },
+      },
+    });
+    const fakeProvider = {
+      proposePlan: vi.fn().mockResolvedValue({ summary: 'do', steps: ['s1'], sites: ['https://example.com'] }),
+      runAgentStep: vi.fn().mockResolvedValue({ tool: 'finish', summary: 'done!' }),
+    };
+    vi.mocked(selectProvider).mockReturnValue(fakeProvider as Provider);
+    vi.mocked(sendToAgentTab).mockImplementation(async (_tabId, message) => {
+      if ((message as { type?: string }).type === 'GET_DOM_TREE') {
+        return { dom: '<button id="1">x</button>', url: 'https://example.com', title: 'Ex' };
+      }
+      return { success: true, message: 'ok' };
+    });
+
+    render(<App />);
+    expect(screen.getByRole('button', { name: /Act without asking/i })).toBeInTheDocument();
+    fireEvent.change(screen.getByPlaceholderText(/Type \/ for commands/i), {
+      target: { value: 'do thing' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /send/i }));
+
+    await waitFor(() => expect(fakeProvider.runAgentStep).toHaveBeenCalled());
+    expect(screen.queryByRole('button', { name: /Approve plan/i })).not.toBeInTheDocument();
   });
 });

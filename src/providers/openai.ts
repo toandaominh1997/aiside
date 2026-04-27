@@ -216,8 +216,12 @@ export class OpenAIProvider implements Provider {
       `Plan summary: ${plan.summary}`,
       `Steps:\n${plan.steps.map((step, index) => `${index + 1}. ${step}`).join('\n')}`,
       `Approved sites: ${plan.sites.join(', ')}`,
-      'On each turn, call exactly ONE of these tools: click, type, navigate, scroll, finish.',
-      'When the task is done, call finish with a user-facing summary.',
+      'On each turn, call exactly ONE available tool.',
+      'Use click/type with targetId from the DOM, or target when the user mentioned a page element token.',
+      'Use click_at when the page is visually clear but DOM targets are missing; x/y are viewport coordinates from the visible screenshot.',
+      'Use press_key, hotkey, and type_text for focused editors, checklist flows, keyboard navigation, and apps like iCloud Notes.',
+      'Use observe to refresh page state, screenshot for visual state, get_console_errors/get_network_failures for debugging, wait for short asynchronous changes, remember/recall for page-local facts, and finish when done.',
+      'When the task is done, call finish with a user-facing summary.'
     ].join('\n');
   }
 }
@@ -225,11 +229,17 @@ export class OpenAIProvider implements Provider {
 function toAgentAction(tool: string, args: Record<string, unknown>): AgentAction {
   switch (tool) {
     case 'click':
-      return { tool: 'click', targetId: Number(args.targetId), rationale: String(args.rationale ?? '') };
+      return {
+        tool: 'click',
+        targetId: optionalNumberOrString(args.targetId),
+        target: optionalString(args.target),
+        rationale: String(args.rationale ?? ''),
+      };
     case 'type':
       return {
         tool: 'type',
-        targetId: Number(args.targetId),
+        targetId: optionalNumberOrString(args.targetId),
+        target: optionalString(args.target),
         value: String(args.value ?? ''),
         rationale: String(args.rationale ?? ''),
       };
@@ -241,11 +251,83 @@ function toAgentAction(tool: string, args: Record<string, unknown>): AgentAction
         direction: args.direction === 'up' ? 'up' : 'down',
         rationale: String(args.rationale ?? ''),
       };
+    case 'click_at':
+      return {
+        tool: 'click_at',
+        x: Number(args.x),
+        y: Number(args.y),
+        rationale: String(args.rationale ?? ''),
+      };
+    case 'press_key':
+      return { tool: 'press_key', key: String(args.key ?? ''), rationale: String(args.rationale ?? '') };
+    case 'hotkey':
+      return { tool: 'hotkey', keys: stringArray(args.keys), rationale: String(args.rationale ?? '') };
+    case 'type_text':
+      return { tool: 'type_text', value: String(args.value ?? ''), rationale: String(args.rationale ?? '') };
+    case 'screenshot':
+      return { tool: 'screenshot', rationale: String(args.rationale ?? '') };
+    case 'get_console_errors':
+      return { tool: 'get_console_errors', rationale: String(args.rationale ?? '') };
+    case 'get_network_failures':
+      return { tool: 'get_network_failures', rationale: String(args.rationale ?? '') };
+    case 'wait':
+      return { tool: 'wait', ms: Number(args.ms ?? 1000), rationale: String(args.rationale ?? '') };
+    case 'observe':
+      return { tool: 'observe', rationale: String(args.rationale ?? '') };
+    case 'remember':
+      return {
+        tool: 'remember',
+        key: String(args.key ?? ''),
+        value: String(args.value ?? ''),
+        rationale: String(args.rationale ?? ''),
+      };
+    case 'recall':
+      return {
+        tool: 'recall',
+        key: optionalString(args.key),
+        rationale: String(args.rationale ?? ''),
+      };
+    case 'read_page':
+      return { tool: 'read_page', rationale: String(args.rationale ?? '') };
+    case 'find_in_page':
+      return {
+        tool: 'find_in_page',
+        query: String(args.query ?? ''),
+        limit: optionalNumber(args.limit),
+        rationale: String(args.rationale ?? ''),
+      };
     case 'finish':
       return { tool: 'finish', summary: String(args.summary ?? '') };
     default:
       throw new Error(`Unknown tool: ${tool}`);
   }
+}
+
+function optionalNumberOrString(value: unknown): number | string | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return undefined;
+    const parsed = Number(trimmed);
+    if (Number.isFinite(parsed) && /^\d+$/.test(trimmed)) return parsed;
+    return trimmed;
+  }
+  return undefined;
+}
+
+function optionalNumber(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : undefined;
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value : undefined;
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.map(String).filter(Boolean) : [];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -58,7 +58,7 @@ describe('SLASH_COMMANDS expand', () => {
   it('extract uses arg when provided', () => {
     const extract = SLASH_COMMANDS.find((command) => command.name === 'extract')!;
     expect(extract.expand!('emails')).toMatch(/Extract emails/);
-    expect(extract.expand!('')).toMatch(/Extract the key structured data/);
+    expect(extract.expand!('')).toMatch(/Extract the most useful structured data/);
   });
 
   it('local commands have no expand', () => {

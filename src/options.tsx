@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import { SitePermissions } from './components/SitePermissions';
 import './index.css';
 
 type ProviderName = 'anthropic' | 'openai';
@@ -161,6 +162,8 @@ const Options = () => {
             </span>
           </label>
         </section>
+
+        <SitePermissions />
       </div>
     </div>
   );

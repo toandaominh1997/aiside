@@ -69,15 +69,51 @@ describe('content script', () => {
     messageListener({ type: 'GET_DOM_TREE' }, {}, sendResponseMock);
 
     expect(sendResponseMock).toHaveBeenCalledWith(expect.objectContaining({
-      dom: expect.stringContaining('<button id="1">Click Me</button>'),
       url: expect.any(String),
       title: expect.any(String)
     }));
-    
+
     const domResponse = sendResponseMock.mock.calls[0][0].dom;
-    expect(domResponse).toContain('<input id="2" type="text">Search...</input>');
-    expect(domResponse).toContain('<a id="3">Link</a>');
+    expect(domResponse).toMatch(/^## region: /m);
+    expect(domResponse).toMatch(/<button id="1"[^>]*data-aid="[^"]+"[^>]*>Click Me<\/button>/);
+    expect(domResponse).toMatch(/<input id="2"[^>]*type="text"[^>]*>Search\.\.\.<\/input>/);
+    expect(domResponse).toMatch(/<a id="3"[^>]*>Link<\/a>/);
     expect(domResponse).not.toContain('Just text'); // Not interactive
+  });
+
+  it('includes contenteditable, ARIA state, bboxes, and open shadow DOM in GET_DOM_TREE', async () => {
+    document.body.innerHTML = `
+      <div contenteditable="true">Editable note</div>
+      <div role="checkbox" aria-checked="true">Done</div>
+      <div id="host"></div>
+    `;
+    const host = document.getElementById('host')!;
+    const shadow = host.attachShadow({ mode: 'open' });
+    shadow.innerHTML = '<button>Shadow action</button>';
+    vi.spyOn(Element.prototype, 'getBoundingClientRect').mockReturnValue({
+      x: 5,
+      y: 6,
+      width: 70,
+      height: 20,
+      top: 6,
+      right: 75,
+      bottom: 26,
+      left: 5,
+      toJSON: () => ({}),
+    });
+
+    await import('./content');
+    const messageListener = vi.mocked(chrome.runtime.onMessage.addListener).mock.calls[0][0];
+
+    const sendResponseMock = vi.fn();
+    messageListener({ type: 'GET_DOM_TREE' }, {}, sendResponseMock);
+
+    const dom = sendResponseMock.mock.calls[0][0].dom;
+    expect(dom).toContain('contenteditable="true"');
+    expect(dom).toContain('role="checkbox"');
+    expect(dom).toContain('aria-checked="true"');
+    expect(dom).toContain('bbox="5,6,70,20"');
+    expect(dom).toContain('Shadow action');
   });
 
   it('executes click actions', async () => {
@@ -95,7 +131,7 @@ describe('content script', () => {
     messageListener({ type: 'EXECUTE_ACTION', payload: { action: 'click', targetId: '1' } }, {}, sendResponseMock);
 
     expect(clickSpy).toHaveBeenCalled();
-    expect(sendResponseMock).toHaveBeenCalledWith({ success: true, message: 'Clicked element 1' });
+    expect(sendResponseMock).toHaveBeenCalledWith({ success: true, message: 'Clicked 1' });
   });
 
   it('executes scroll down without needing a targetId', async () => {
@@ -269,6 +305,245 @@ describe('content script', () => {
     messageListener({ type: 'EXECUTE_ACTION', payload: { action: 'type', targetId: '1', value: 'hello world' } }, {}, sendResponseMock);
 
     expect(input.value).toBe('hello world');
-    expect(sendResponseMock).toHaveBeenCalledWith({ success: true, message: 'Typed "hello world" into element 1' });
+    expect(sendResponseMock).toHaveBeenCalledWith({ success: true, message: 'Typed "hello world" into 1' });
+  });
+
+  it('executes click and type actions by mention token', async () => {
+    document.body.innerHTML = `
+      <button>Start trial</button>
+      <input placeholder="Email" />
+    `;
+    vi.spyOn(Element.prototype, 'getBoundingClientRect').mockReturnValue({
+      x: 0,
+      y: 0,
+      width: 100,
+      height: 40,
+      top: 0,
+      right: 100,
+      bottom: 40,
+      left: 0,
+      toJSON: () => ({}),
+    });
+    const button = document.querySelector('button')!;
+    const input = document.querySelector('input')!;
+    const clickSpy = vi.spyOn(button, 'click');
+
+    await import('./content');
+    const messageListener = vi.mocked(chrome.runtime.onMessage.addListener).mock.calls[0][0];
+    const mentionsResponse = vi.fn();
+    messageListener({ type: 'GET_MENTION_CANDIDATES' }, {}, mentionsResponse);
+    const mentions = mentionsResponse.mock.calls[0][0].mentions;
+    const buttonToken = mentions.find((m: { kind: string }) => m.kind === 'button').token;
+    const inputToken = mentions.find((m: { kind: string }) => m.kind === 'input').token;
+
+    const clickResponse = vi.fn();
+    messageListener({ type: 'EXECUTE_ACTION', payload: { action: 'click', target: buttonToken } }, {}, clickResponse);
+    expect(clickSpy).toHaveBeenCalled();
+    expect(clickResponse).toHaveBeenCalledWith({ success: true, message: `Clicked ${buttonToken}` });
+
+    const typeResponse = vi.fn();
+    messageListener({ type: 'EXECUTE_ACTION', payload: { action: 'type', target: inputToken, value: 'a@b.com' } }, {}, typeResponse);
+    expect(input.value).toBe('a@b.com');
+    expect(typeResponse).toHaveBeenCalledWith({ success: true, message: `Typed "a@b.com" into ${inputToken}` });
+  });
+
+  it('captures console errors and resource failures', async () => {
+    await import('./content');
+    const messageListener = vi.mocked(chrome.runtime.onMessage.addListener).mock.calls[0][0];
+
+    console.error('boom');
+    const img = document.createElement('img');
+    img.src = 'https://example.test/missing.png';
+    document.body.appendChild(img);
+    img.dispatchEvent(new Event('error', { bubbles: true }));
+
+    const consoleResponse = vi.fn();
+    messageListener({ type: 'EXECUTE_ACTION', payload: { action: 'get_console_errors' } }, {}, consoleResponse);
+    expect(consoleResponse.mock.calls[0][0].data.errors).toEqual(
+      expect.arrayContaining([expect.objectContaining({ message: 'boom', source: 'console.error' })]),
+    );
+
+    const networkResponse = vi.fn();
+    messageListener({ type: 'EXECUTE_ACTION', payload: { action: 'get_network_failures' } }, {}, networkResponse);
+    expect(networkResponse.mock.calls[0][0].data.failures).toEqual(
+      expect.arrayContaining([expect.objectContaining({ kind: 'img', message: 'Resource failed to load' })]),
+    );
+  });
+
+  it('executes coordinate clicks', async () => {
+    document.body.innerHTML = `<button>Visual target</button>`;
+    const button = document.querySelector('button')!;
+    const clickSpy = vi.fn();
+    button.addEventListener('click', clickSpy);
+    if (typeof document.elementFromPoint !== 'function') {
+      (document as unknown as { elementFromPoint: (x: number, y: number) => Element | null }).elementFromPoint = () => null;
+    }
+    vi.spyOn(document, 'elementFromPoint').mockReturnValue(button);
+
+    await import('./content');
+    const messageListener = vi.mocked(chrome.runtime.onMessage.addListener).mock.calls[0][0];
+
+    const sendResponseMock = vi.fn();
+    messageListener({ type: 'EXECUTE_ACTION', payload: { action: 'click_at', x: 12, y: 34 } }, {}, sendResponseMock);
+
+    expect(clickSpy).toHaveBeenCalled();
+    expect(sendResponseMock).toHaveBeenCalledWith({ success: true, message: 'Clicked button at 12,34' });
+  });
+
+  it('reports coordinate click failure when no element is found', async () => {
+    if (typeof document.elementFromPoint !== 'function') {
+      (document as unknown as { elementFromPoint: (x: number, y: number) => Element | null }).elementFromPoint = () => null;
+    }
+    vi.spyOn(document, 'elementFromPoint').mockReturnValue(null);
+
+    await import('./content');
+    const messageListener = vi.mocked(chrome.runtime.onMessage.addListener).mock.calls[0][0];
+
+    const sendResponseMock = vi.fn();
+    messageListener({ type: 'EXECUTE_ACTION', payload: { action: 'click_at', x: 12, y: 34 } }, {}, sendResponseMock);
+
+    expect(sendResponseMock).toHaveBeenCalledWith({ success: false, error: 'No element at 12,34' });
+  });
+
+  it('executes press_key and hotkey events', async () => {
+    document.body.innerHTML = `<input />`;
+    const input = document.querySelector('input')!;
+    input.focus();
+    const keydown = vi.fn();
+    const keyup = vi.fn();
+    input.addEventListener('keydown', keydown);
+    input.addEventListener('keyup', keyup);
+
+    await import('./content');
+    const messageListener = vi.mocked(chrome.runtime.onMessage.addListener).mock.calls[0][0];
+
+    const pressResponse = vi.fn();
+    messageListener({ type: 'EXECUTE_ACTION', payload: { action: 'press_key', key: 'Enter' } }, {}, pressResponse);
+    expect(keydown).toHaveBeenCalledWith(expect.objectContaining({ key: 'Enter' }));
+    expect(keyup).toHaveBeenCalledWith(expect.objectContaining({ key: 'Enter' }));
+    expect(pressResponse).toHaveBeenCalledWith({ success: true, message: 'Pressed Enter' });
+
+    const hotkeyResponse = vi.fn();
+    messageListener({ type: 'EXECUTE_ACTION', payload: { action: 'hotkey', keys: ['Meta', 'K'] } }, {}, hotkeyResponse);
+    expect(keydown).toHaveBeenCalledWith(expect.objectContaining({ key: 'K', metaKey: true }));
+    expect(hotkeyResponse).toHaveBeenCalledWith({ success: true, message: 'Pressed Meta+K' });
+  });
+
+  it('types into the focused element and contenteditable targets', async () => {
+    document.body.innerHTML = `<input /><div contenteditable="true"></div>`;
+    const input = document.querySelector('input')!;
+    input.focus();
+
+    await import('./content');
+    const messageListener = vi.mocked(chrome.runtime.onMessage.addListener).mock.calls[0][0];
+
+    const typeTextResponse = vi.fn();
+    messageListener({ type: 'EXECUTE_ACTION', payload: { action: 'type_text', value: 'hello' } }, {}, typeTextResponse);
+    expect(input.value).toBe('hello');
+    expect(typeTextResponse).toHaveBeenCalledWith({ success: true, message: 'Typed "hello" into focused element' });
+
+    messageListener({ type: 'GET_DOM_TREE' }, {}, vi.fn());
+    const targetTypeResponse = vi.fn();
+    messageListener({ type: 'EXECUTE_ACTION', payload: { action: 'type', targetId: '2', value: 'note' } }, {}, targetTypeResponse);
+    expect(document.querySelector('[contenteditable="true"]')?.textContent).toBe('note');
+    expect(targetTypeResponse).toHaveBeenCalledWith({ success: true, message: 'Typed "note" into 2' });
+  });
+
+  it('remembers, recalls, and observes page state', async () => {
+    document.body.innerHTML = `<button>Go</button>`;
+    vi.spyOn(Element.prototype, 'getBoundingClientRect').mockReturnValue({
+      x: 0,
+      y: 0,
+      width: 100,
+      height: 40,
+      top: 0,
+      right: 100,
+      bottom: 40,
+      left: 0,
+      toJSON: () => ({}),
+    });
+    await import('./content');
+    const messageListener = vi.mocked(chrome.runtime.onMessage.addListener).mock.calls[0][0];
+
+    const rememberResponse = vi.fn();
+    messageListener(
+      { type: 'EXECUTE_ACTION', payload: { action: 'remember', key: 'page', value: 'pricing' } },
+      {},
+      rememberResponse,
+    );
+    expect(rememberResponse).toHaveBeenCalledWith(
+      expect.objectContaining({ success: true, data: { memory: { page: 'pricing' } } }),
+    );
+
+    const recallResponse = vi.fn();
+    messageListener({ type: 'EXECUTE_ACTION', payload: { action: 'recall', key: 'page' } }, {}, recallResponse);
+    expect(recallResponse).toHaveBeenCalledWith(
+      expect.objectContaining({ success: true, data: { key: 'page', value: 'pricing' } }),
+    );
+
+    const observeResponse = vi.fn();
+    messageListener({ type: 'EXECUTE_ACTION', payload: { action: 'observe' } }, {}, observeResponse);
+    expect(observeResponse).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: true,
+        message: 'Observed page state',
+        data: expect.objectContaining({
+          url: expect.any(String),
+          title: expect.any(String),
+          dom: expect.stringContaining('<button'),
+          consoleErrors: expect.any(Array),
+          networkFailures: expect.any(Array),
+          memory: { page: 'pricing' },
+        }),
+      }),
+    );
+  });
+
+  it('read_page returns title, content, excerpt', async () => {
+    document.title = 'Topology Notes';
+    document.body.innerHTML = `
+      <main>
+        <h1>Topology Notes</h1>
+        <p>An open set is a set whose complement is closed.</p>
+        <h2>Examples</h2>
+        <p>The interval (0, 1) is open.</p>
+      </main>
+    `;
+    await import('./content');
+    const messageListener = vi.mocked(chrome.runtime.onMessage.addListener).mock.calls[0][0];
+
+    const sendResponseMock = vi.fn();
+    messageListener({ type: 'EXECUTE_ACTION', payload: { action: 'read_page' } }, {}, sendResponseMock);
+    expect(sendResponseMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: true,
+        data: expect.objectContaining({
+          title: 'Topology Notes',
+          content: expect.stringContaining('# Topology Notes'),
+          excerpt: expect.stringContaining('open set'),
+          url: expect.any(String),
+        }),
+      }),
+    );
+  });
+
+  it('find_in_page returns hits with surrounding context', async () => {
+    document.body.innerHTML = `
+      <p>Pricing starts at $10 per month.</p>
+      <p>For enterprise pricing contact sales.</p>
+    `;
+    await import('./content');
+    const messageListener = vi.mocked(chrome.runtime.onMessage.addListener).mock.calls[0][0];
+
+    const sendResponseMock = vi.fn();
+    messageListener(
+      { type: 'EXECUTE_ACTION', payload: { action: 'find_in_page', query: 'pricing', limit: 5 } },
+      {},
+      sendResponseMock,
+    );
+    const response = sendResponseMock.mock.calls[0][0];
+    expect(response.success).toBe(true);
+    expect(response.data.hits.length).toBeGreaterThan(0);
+    expect(response.data.hits[0].context.toLowerCase()).toContain('pricing');
   });
 });

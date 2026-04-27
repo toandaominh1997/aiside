@@ -1,8 +1,24 @@
 import { useEffect, useRef, useState } from 'react';
-import { ArrowUp, MessageSquarePlus, MoreVertical, ChevronDown, Zap, Hand, Plus } from 'lucide-react';
+import { ArrowUp, Check, FastForward, MessageSquarePlus, MoreVertical, ChevronDown, Zap, Hand, Plus } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
-import { runPlan, type ActionLogEntry, type LoopDeps, type LoopResult } from './agent/loop';
+import {
+  runPlan,
+  type ActionLogEntry,
+  type LoopDeps,
+  type LoopResult,
+  type PermissionMode,
+} from './agent/loop';
 import { validatePlan } from './agent/plan';
+import {
+  addOrigins,
+  ALLOWLIST_STORAGE_KEY,
+  actMode,
+  isAllowed,
+  loadAllowlist,
+  setOriginActMode,
+  touchOrigin,
+  type Allowlist,
+} from './agent/allowlist';
 import {
   getAgentTabUrl,
   navigateAgentTab,
@@ -12,6 +28,12 @@ import {
 import { ActionLogRow } from './components/ActionLogRow';
 import { CommandMenu } from './components/CommandMenu';
 import { MentionMenu } from './components/MentionMenu';
+import { PlanCard } from './components/PlanCard';
+import {
+  PermissionCard,
+  type PermissionDecision,
+  type PermissionRequest,
+} from './components/PermissionCard';
 import {
   filterCommands,
   helpMessage,
@@ -30,14 +52,26 @@ import {
 import { selectProvider } from './providers/index';
 import type { AgentAction, Message, Plan, ProviderConfig } from './providers/types';
 
-type RunState = 'idle' | 'planning' | 'running' | 'paused' | 'done' | 'error';
+type RunState = 'idle' | 'planning' | 'awaiting-approval' | 'running' | 'paused' | 'done' | 'error';
 
 const MAX_STEPS = 25;
 
 interface ChatItem {
-  kind: 'message' | 'log';
+  kind: 'message' | 'log' | 'plan' | 'permission';
   message?: Message;
   entry?: ActionLogEntry;
+  plan?: Plan;
+  planId?: string;
+  permission?: PermissionRequest;
+  resolved?: boolean;
+}
+
+interface PendingPlan {
+  id: string;
+  plan: Plan;
+  userText: string;
+  llmContent: string;
+  baseTab: { url: string; title: string; id: number };
 }
 
 function App() {
@@ -63,6 +97,12 @@ function App() {
   });
   const stopController = useRef<AbortController | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [pendingPlan, setPendingPlan] = useState<PendingPlan | null>(null);
+  const [permissionMode, setPermissionMode] = useState<PermissionMode>('auto');
+  const [permissionMenuOpen, setPermissionMenuOpen] = useState(false);
+  const allowlistRef = useRef<Allowlist>({ version: 1, origins: {} });
+  const sessionAllowsRef = useRef<Map<string, Set<string>>>(new Map());
+  const permissionResolvers = useRef<Map<string, (decision: PermissionDecision) => void>>(new Map());
 
   useEffect(() => {
     const loadConfig = () => {
@@ -98,9 +138,27 @@ function App() {
       }
     };
     chrome.runtime.onMessage.addListener(messageListener);
+
+    void loadAllowlist().then((list) => {
+      allowlistRef.current = list;
+    });
+    const allowlistListener = (
+      changes: { [key: string]: chrome.storage.StorageChange },
+      areaName: string,
+    ) => {
+      if (areaName !== 'local') return;
+      if (changes[ALLOWLIST_STORAGE_KEY]) {
+        void loadAllowlist().then((list) => {
+          allowlistRef.current = list;
+        });
+      }
+    };
+    chrome.storage.onChanged.addListener(allowlistListener);
+
     return () => {
       chrome.runtime.onMessage.removeListener(messageListener);
       chrome.storage.onChanged.removeListener(storageListener);
+      chrome.storage.onChanged.removeListener(allowlistListener);
     };
   }, []);
 
@@ -264,7 +322,22 @@ function App() {
       });
       setStreamingText('');
       const plan = validatePlan(rawPlan);
-      await startPlan(plan, currentTab.id);
+      const planId = (globalThis.crypto?.randomUUID?.() ?? `plan-${Date.now()}`);
+      const pending: PendingPlan = {
+        id: planId,
+        plan,
+        userText,
+        llmContent,
+        baseTab: currentTab,
+      };
+      if (canAutoApprovePlan(plan)) {
+        setPendingPlan(null);
+        await startApprovedPlan(pending);
+        return;
+      }
+      setPendingPlan(pending);
+      setRunState('awaiting-approval');
+      append({ kind: 'plan', plan, planId });
     } catch (err) {
       setStreamingText('');
       append({
@@ -274,6 +347,49 @@ function App() {
       setRunState('error');
       setTimeout(() => setRunState('idle'), 0);
     }
+  }
+
+  function canAutoApprovePlan(plan: Plan): boolean {
+    if (permissionMode !== 'auto') return false;
+    return plan.sites.every((site) => actMode(allowlistRef.current, site) === 'auto');
+  }
+
+  async function startApprovedPlan(pending: PendingPlan) {
+    let list = await addOrigins(pending.plan.sites);
+    for (const site of pending.plan.sites) {
+      list = await setOriginActMode(site, 'auto');
+    }
+    allowlistRef.current = list;
+
+    const agentTabId = pending.baseTab.id;
+
+    sessionAllowsRef.current = new Map();
+    await startPlan(pending.plan, agentTabId, pending.llmContent);
+  }
+
+  async function approvePlan() {
+    const pending = pendingPlan;
+    if (!pending || runState !== 'awaiting-approval') return;
+    setPendingPlan(null);
+    setItems((previous) =>
+      previous.map((item) =>
+        item.kind === 'plan' && item.planId === pending.id ? { ...item, resolved: true } : item,
+      ),
+    );
+    await startApprovedPlan(pending);
+  }
+
+  function declinePlan() {
+    const pending = pendingPlan;
+    if (!pending) return;
+    setPendingPlan(null);
+    setItems((previous) =>
+      previous.map((item) =>
+        item.kind === 'plan' && item.planId === pending.id ? { ...item, resolved: true } : item,
+      ),
+    );
+    setInput(`${pending.userText}\n\n(Plan: ${pending.plan.summary})`);
+    setRunState('idle');
   }
 
   async function handleSend() {
@@ -294,7 +410,19 @@ function App() {
     await submitPrompt(trimmed);
   }
 
-  async function startPlan(plan: Plan, tabId: number) {
+  async function captureVisibleTab(): Promise<string | undefined> {
+    return new Promise((resolve) => {
+      chrome.tabs.captureVisibleTab({ format: 'jpeg', quality: 70 }, (dataUrl) => {
+        if (chrome.runtime.lastError) {
+          resolve(undefined);
+          return;
+        }
+        resolve(dataUrl);
+      });
+    });
+  }
+
+  async function startPlan(plan: Plan, tabId: number, initialUserText?: string) {
     setRunState('running');
     const dispose = onAgentTabClosed(tabId, () => {
       setRunState('paused');
@@ -304,6 +432,10 @@ function App() {
 
     const provider = selectProvider(config);
     stopController.current = new AbortController();
+    const initialMessages: Message[] = initialUserText
+      ? [{ role: 'user', content: initialUserText }]
+      : [];
+
     const deps: LoopDeps = {
       agentTabId: tabId,
       getDomTree: () =>
@@ -317,8 +449,47 @@ function App() {
           payload: actionToContentPayload(action),
         }),
       navigate: (url) => navigateAgentTab(tabId, url),
+      captureScreenshot: captureVisibleTab,
+      includeScreenshots: config.sendScreenshots,
       onLog: (entry) => append({ kind: 'log', entry }),
       maxSteps: MAX_STEPS,
+      initialMessages,
+      isOriginAllowed: (origin) => isAllowed(allowlistRef.current, origin),
+      onAllowlistTouch: (origin) => {
+        void touchOrigin(origin).then(async () => {
+          allowlistRef.current = await loadAllowlist();
+        });
+      },
+      permissionMode,
+      checkPermission: (origin, action) => {
+        if (!origin) return 'ask';
+        const session = sessionAllowsRef.current.get(origin);
+        if (session?.has(action.tool)) return 'allow';
+        const mode = actMode(allowlistRef.current, origin);
+        if (mode === 'auto') return 'allow';
+        if (mode === 'never') return 'deny';
+        return 'ask';
+      },
+      onPermissionDecision: (origin, action, decision) => {
+        if (!origin) return;
+        if (decision === 'always') {
+          void setOriginActMode(origin, 'auto').then((list) => {
+            allowlistRef.current = list;
+          });
+        }
+        if (decision === 'once') {
+          const set = sessionAllowsRef.current.get(origin) ?? new Set<string>();
+          set.add(action.tool);
+          sessionAllowsRef.current.set(origin, set);
+        }
+      },
+      requestPermission: (origin, action) => {
+        return new Promise((resolve) => {
+          const id = globalThis.crypto?.randomUUID?.() ?? `perm-${Date.now()}-${Math.random()}`;
+          permissionResolvers.current.set(id, resolve);
+          append({ kind: 'permission', permission: { id, origin, action } });
+        });
+      },
     };
 
     let result: LoopResult;
@@ -358,7 +529,53 @@ function App() {
   function clearHistory() {
     setItems([]);
     setRunState('idle');
+    setPendingPlan(null);
+    permissionResolvers.current.clear();
+    sessionAllowsRef.current.clear();
   }
+
+  function resolvePermission(id: string, decision: PermissionDecision) {
+    const resolver = permissionResolvers.current.get(id);
+    if (!resolver) return;
+    permissionResolvers.current.delete(id);
+    resolver(decision);
+    setItems((previous) =>
+      previous.map((item) =>
+        item.kind === 'permission' && item.permission?.id === id ? { ...item, resolved: true } : item,
+      ),
+    );
+  }
+
+  function changePermissionMode(mode: PermissionMode) {
+    setPermissionMode(mode);
+    setPermissionMenuOpen(false);
+  }
+
+  const permissionModeLabel: Record<PermissionMode, string> = {
+    'read-only': 'Ask before acting',
+    ask: 'Ask before acting',
+    auto: 'Act without asking',
+  };
+
+  const permissionModeOptions: Array<{
+    mode: PermissionMode;
+    label: string;
+    description: string;
+    Icon: typeof Hand;
+  }> = [
+    {
+      mode: 'ask',
+      label: 'Ask before acting',
+      description: 'AISide aligns on its approach before taking actions',
+      Icon: Hand,
+    },
+    {
+      mode: 'auto',
+      label: 'Act without asking',
+      description: 'AISide takes actions without asking for permission',
+      Icon: FastForward,
+    },
+  ];
 
   return (
     <div className="flex flex-col h-screen bg-[#2b2d31] text-gray-200 font-sans">
@@ -463,6 +680,29 @@ function App() {
 
             if (item.kind === 'log' && item.entry) {
               return <ActionLogRow key={index} entry={item.entry} />;
+            }
+
+            if (item.kind === 'plan' && item.plan) {
+              return (
+                <PlanCard
+                  key={index}
+                  plan={item.plan}
+                  modelLabel={config.model === 'claude-opus-4-7' ? 'Opus 4.7' : config.model}
+                  onApprove={() => void approvePlan()}
+                  onMakeChanges={declinePlan}
+                  disabled={item.resolved}
+                />
+              );
+            }
+
+            if (item.kind === 'permission' && item.permission) {
+              return (
+                <PermissionCard
+                  key={index}
+                  request={item.permission}
+                  onDecide={(decision) => resolvePermission(item.permission!.id, decision)}
+                />
+              );
             }
 
             return null;
@@ -597,11 +837,44 @@ function App() {
             rows={1}
           />
           <div className="flex items-center justify-between mt-1">
-            <button className="flex items-center gap-1.5 text-gray-400 hover:text-gray-300 active:scale-95 transition-all duration-150 text-[13px] px-1.5 py-1 rounded-md hover:bg-white/5 active:bg-white/10">
-              <Hand size={14} />
-              <span>Ask before acting</span>
-              <ChevronDown size={14} />
-            </button>
+            <div className="relative">
+              <button
+                type="button"
+                aria-haspopup="listbox"
+                aria-expanded={permissionMenuOpen}
+                onClick={() => setPermissionMenuOpen((v) => !v)}
+                className="flex items-center gap-1.5 text-gray-400 hover:text-gray-300 active:scale-95 transition-all duration-150 text-[13px] px-1.5 py-1 rounded-md hover:bg-white/5 active:bg-white/10"
+              >
+                <Hand size={14} />
+                <span>{permissionModeLabel[permissionMode]}</span>
+                <ChevronDown size={14} />
+              </button>
+              {permissionMenuOpen && (
+                <div
+                  role="listbox"
+                  aria-label="Permission mode"
+                  className="absolute bottom-full left-0 mb-3 bg-[#2b2d2a] border border-white/10 rounded-2xl shadow-2xl overflow-hidden text-sm w-[280px] z-10 p-2"
+                >
+                  {permissionModeOptions.map(({ mode, label, description, Icon }) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      role="option"
+                      aria-selected={permissionMode === mode}
+                      onClick={() => changePermissionMode(mode)}
+                      className="w-full flex items-start gap-3 rounded-xl px-3 py-3 text-left text-gray-200 hover:bg-white/5 active:bg-white/10 transition-colors"
+                    >
+                      <Icon size={18} className="mt-0.5 text-gray-300 shrink-0" />
+                      <span className="flex-1">
+                        <span className="block text-[15px] leading-5 text-gray-100">{label}</span>
+                        <span className="block mt-1 text-[13px] leading-5 text-gray-400">{description}</span>
+                      </span>
+                      {permissionMode === mode && <Check size={17} className="mt-0.5 text-blue-400 shrink-0" />}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
 
             <div className="flex items-center gap-1">
               <button className="p-1.5 rounded-md text-gray-400 hover:text-gray-200 hover:bg-white/5 active:bg-white/10 active:scale-90 transition-all duration-150">
@@ -642,21 +915,52 @@ function App() {
 
 function actionToContentPayload(action: AgentAction): {
   action: string;
-  targetId?: number;
+  targetId?: number | string;
+  target?: string;
   value?: string;
   direction?: 'up' | 'down';
+  key?: string;
+  keys?: string[];
+  x?: number;
+  y?: number;
+  query?: string;
+  limit?: number;
 } {
   switch (action.tool) {
     case 'click':
-      return { action: 'click', targetId: action.targetId };
+      return { action: 'click', targetId: action.targetId, target: action.target };
     case 'type':
-      return { action: 'type', targetId: action.targetId, value: action.value };
+      return { action: 'type', targetId: action.targetId, target: action.target, value: action.value };
     case 'scroll':
       return { action: 'scroll', direction: action.direction };
     case 'navigate':
       return { action: 'navigate', value: action.url };
+    case 'get_console_errors':
+      return { action: 'get_console_errors' };
+    case 'get_network_failures':
+      return { action: 'get_network_failures' };
+    case 'observe':
+      return { action: 'observe' };
+    case 'remember':
+      return { action: 'remember', key: action.key, value: action.value };
+    case 'recall':
+      return { action: 'recall', key: action.key };
+    case 'read_page':
+      return { action: 'read_page' };
+    case 'find_in_page':
+      return { action: 'find_in_page', query: action.query, limit: action.limit };
+    case 'click_at':
+      return { action: 'click_at', x: action.x, y: action.y };
+    case 'press_key':
+      return { action: 'press_key', key: action.key };
+    case 'hotkey':
+      return { action: 'hotkey', keys: action.keys };
+    case 'type_text':
+      return { action: 'type_text', value: action.value };
+    case 'screenshot':
+    case 'wait':
     case 'finish':
-      return { action: 'finish' };
+      return { action: action.tool };
   }
 }
 
