@@ -669,7 +669,7 @@ function App() {
                     {message.role === 'user' ? (
                       <p className="whitespace-pre-wrap">{message.content}</p>
                     ) : (
-                      <div className="prose prose-invert prose-sm max-w-none prose-headings:mt-4 prose-headings:mb-2 prose-p:my-2 prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5 prose-pre:bg-[#1e1f22] prose-pre:rounded-md prose-code:text-gray-200 prose-strong:text-gray-100">
+                      <div className="assistant-response prose prose-invert prose-sm max-w-none text-[15px] leading-7 prose-headings:mt-5 prose-headings:mb-2 prose-headings:text-gray-100 prose-headings:font-semibold prose-headings:tracking-[-0.01em] prose-h1:text-xl prose-h2:text-lg prose-h3:text-base prose-p:my-3 prose-p:text-gray-200 prose-a:text-[#d6c7a1] prose-a:no-underline hover:prose-a:text-[#eadfbd] prose-strong:text-gray-50 prose-strong:font-semibold prose-ul:my-3 prose-ol:my-3 prose-li:my-1.5 prose-li:pl-1 prose-li:marker:text-gray-500 prose-blockquote:my-4 prose-blockquote:border-l-[#d6c7a1]/70 prose-blockquote:bg-white/[0.03] prose-blockquote:rounded-r-xl prose-blockquote:py-1 prose-blockquote:pr-3 prose-code:rounded-md prose-code:bg-white/[0.06] prose-code:px-1.5 prose-code:py-0.5 prose-code:text-[0.86em] prose-code:text-[#eadfbd] prose-pre:my-4 prose-pre:rounded-2xl prose-pre:border prose-pre:border-white/10 prose-pre:bg-[#17181d] prose-pre:p-4 prose-pre:shadow-inner prose-hr:border-white/10">
                         <ReactMarkdown>{message.content}</ReactMarkdown>
                       </div>
                     )}

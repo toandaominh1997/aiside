@@ -6,3 +6,44 @@ html, body, #root {
   margin: 0;
   padding: 0;
 }
+
+.assistant-response > :first-child {
+  margin-top: 0;
+}
+
+.assistant-response > :last-child {
+  margin-bottom: 0;
+}
+
+.assistant-response table {
+  display: block;
+  width: 100%;
+  overflow-x: auto;
+  border-collapse: separate;
+  border-spacing: 0;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+}
+
+.assistant-response th,
+.assistant-response td {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 0.5rem 0.7rem;
+}
+
+.assistant-response th {
+  background: rgba(255, 255, 255, 0.04);
+  color: rgb(243 244 246);
+  font-weight: 600;
+}
+
+.assistant-response tr:last-child td {
+  border-bottom: 0;
+}
+
+.assistant-response pre code {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: inherit;
+}
