@@ -7,6 +7,9 @@ describe('toolSchemas', () => {
     expect(names).toEqual([
       'click',
       'click_at',
+      'extract_table',
+      'fetch_url',
+      'fill_form',
       'find_in_page',
       'finish',
       'get_console_errors',
@@ -20,9 +23,14 @@ describe('toolSchemas', () => {
       'remember',
       'screenshot',
       'scroll',
+      'tabs_list',
+      'tabs_open',
+      'tabs_switch',
       'type',
       'type_text',
       'wait',
+      'wait_for_selector',
+      'wait_for_url',
     ]);
   });
 

@@ -1,4 +1,5 @@
 import { validatePlan } from '../agent/plan';
+import { registry } from '../agent/tools';
 import { PROPOSE_PLAN_SCHEMA, TOOL_SCHEMAS, type ToolSchema } from './toolSchemas';
 import type {
   AgentAction,
@@ -217,117 +218,23 @@ export class OpenAIProvider implements Provider {
       `Steps:\n${plan.steps.map((step, index) => `${index + 1}. ${step}`).join('\n')}`,
       `Approved sites: ${plan.sites.join(', ')}`,
       'On each turn, call exactly ONE available tool.',
+      'A fresh DOM snapshot of the current page is attached automatically every turn — do NOT call observe, screenshot, or read_page just to "see what is on the page". They are redundant and waste your step budget.',
+      'Only call observe/read_page if the previous action likely changed the DOM in a way the auto-snapshot may have missed (e.g. a long async render after a click). Only call screenshot when you specifically need pixel-level visual info that the DOM does not convey.',
+      'Never call the same context-gathering tool (observe, screenshot, read_page, find_in_page) twice in a row — if you did not learn what you needed the first time, take a different action instead.',
+      'Prefer decisive progress: click, type, navigate, or finish. Use find_in_page only with a specific query you have not searched yet.',
       'Use click/type with targetId from the DOM, or target when the user mentioned a page element token.',
       'Use click_at when the page is visually clear but DOM targets are missing; x/y are viewport coordinates from the visible screenshot.',
       'Use press_key, hotkey, and type_text for focused editors, checklist flows, keyboard navigation, and apps like iCloud Notes.',
-      'Use observe to refresh page state, screenshot for visual state, get_console_errors/get_network_failures for debugging, wait for short asynchronous changes, remember/recall for page-local facts, and finish when done.',
+      'Use get_console_errors/get_network_failures for debugging, wait for short asynchronous changes, remember/recall for page-local facts, and finish when done.',
       'When the task is done, call finish with a user-facing summary.'
     ].join('\n');
   }
 }
 
 function toAgentAction(tool: string, args: Record<string, unknown>): AgentAction {
-  switch (tool) {
-    case 'click':
-      return {
-        tool: 'click',
-        targetId: optionalNumberOrString(args.targetId),
-        target: optionalString(args.target),
-        rationale: String(args.rationale ?? ''),
-      };
-    case 'type':
-      return {
-        tool: 'type',
-        targetId: optionalNumberOrString(args.targetId),
-        target: optionalString(args.target),
-        value: String(args.value ?? ''),
-        rationale: String(args.rationale ?? ''),
-      };
-    case 'navigate':
-      return { tool: 'navigate', url: String(args.url), rationale: String(args.rationale ?? '') };
-    case 'scroll':
-      return {
-        tool: 'scroll',
-        direction: args.direction === 'up' ? 'up' : 'down',
-        rationale: String(args.rationale ?? ''),
-      };
-    case 'click_at':
-      return {
-        tool: 'click_at',
-        x: Number(args.x),
-        y: Number(args.y),
-        rationale: String(args.rationale ?? ''),
-      };
-    case 'press_key':
-      return { tool: 'press_key', key: String(args.key ?? ''), rationale: String(args.rationale ?? '') };
-    case 'hotkey':
-      return { tool: 'hotkey', keys: stringArray(args.keys), rationale: String(args.rationale ?? '') };
-    case 'type_text':
-      return { tool: 'type_text', value: String(args.value ?? ''), rationale: String(args.rationale ?? '') };
-    case 'screenshot':
-      return { tool: 'screenshot', rationale: String(args.rationale ?? '') };
-    case 'get_console_errors':
-      return { tool: 'get_console_errors', rationale: String(args.rationale ?? '') };
-    case 'get_network_failures':
-      return { tool: 'get_network_failures', rationale: String(args.rationale ?? '') };
-    case 'wait':
-      return { tool: 'wait', ms: Number(args.ms ?? 1000), rationale: String(args.rationale ?? '') };
-    case 'observe':
-      return { tool: 'observe', rationale: String(args.rationale ?? '') };
-    case 'remember':
-      return {
-        tool: 'remember',
-        key: String(args.key ?? ''),
-        value: String(args.value ?? ''),
-        rationale: String(args.rationale ?? ''),
-      };
-    case 'recall':
-      return {
-        tool: 'recall',
-        key: optionalString(args.key),
-        rationale: String(args.rationale ?? ''),
-      };
-    case 'read_page':
-      return { tool: 'read_page', rationale: String(args.rationale ?? '') };
-    case 'find_in_page':
-      return {
-        tool: 'find_in_page',
-        query: String(args.query ?? ''),
-        limit: optionalNumber(args.limit),
-        rationale: String(args.rationale ?? ''),
-      };
-    case 'finish':
-      return { tool: 'finish', summary: String(args.summary ?? '') };
-    default:
-      throw new Error(`Unknown tool: ${tool}`);
-  }
-}
-
-function optionalNumberOrString(value: unknown): number | string | undefined {
-  if (value === undefined || value === null || value === '') return undefined;
-  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
-  if (typeof value === 'string') {
-    const trimmed = value.trim();
-    if (!trimmed) return undefined;
-    const parsed = Number(trimmed);
-    if (Number.isFinite(parsed) && /^\d+$/.test(trimmed)) return parsed;
-    return trimmed;
-  }
-  return undefined;
-}
-
-function optionalNumber(value: unknown): number | undefined {
-  if (value === undefined || value === null || value === '') return undefined;
-  const number = Number(value);
-  return Number.isFinite(number) ? number : undefined;
-}
-
-function optionalString(value: unknown): string | undefined {
-  return typeof value === 'string' && value.trim() ? value : undefined;
-}
-
-function stringArray(value: unknown): string[] {
-  return Array.isArray(value) ? value.map(String).filter(Boolean) : [];
+  const def = registry.get(tool);
+  if (!def) throw new Error(`Unknown tool: ${tool}`);
+  return def.coerce(args);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

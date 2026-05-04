@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState } from 'react';
+import { Suspense, lazy, memo, useEffect, useRef, useState } from 'react';
 import { ArrowUp, Check, FastForward, MessageSquarePlus, MoreVertical, ChevronDown, Zap, Hand, Plus } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
 import {
+  isHighRisk,
   runPlan,
   type ActionLogEntry,
   type LoopDeps,
@@ -50,13 +50,30 @@ import {
   type Mention,
 } from './agent/mentions';
 import { selectProvider } from './providers/index';
+import { registry } from './agent/tools';
 import type { AgentAction, Message, Plan, ProviderConfig } from './providers/types';
+
+const ReactMarkdown = lazy(() => import('react-markdown'));
 
 type RunState = 'idle' | 'planning' | 'awaiting-approval' | 'running' | 'paused' | 'done' | 'error';
 
 const MAX_STEPS = 25;
 
+const ASSISTANT_PROSE_CLASS =
+  'assistant-response prose prose-invert prose-sm max-w-none text-[15px] leading-7 prose-headings:mt-5 prose-headings:mb-2 prose-headings:text-gray-100 prose-headings:font-semibold prose-headings:tracking-[-0.01em] prose-h1:text-xl prose-h2:text-lg prose-h3:text-base prose-p:my-3 prose-p:text-gray-200 prose-a:text-[#d6c7a1] prose-a:no-underline hover:prose-a:text-[#eadfbd] prose-strong:text-gray-50 prose-strong:font-semibold prose-ul:my-3 prose-ol:my-3 prose-li:my-1.5 prose-li:pl-1 prose-li:marker:text-gray-500 prose-blockquote:my-4 prose-blockquote:border-l-[#d6c7a1]/70 prose-blockquote:bg-white/[0.03] prose-blockquote:rounded-r-xl prose-blockquote:py-1 prose-blockquote:pr-3 prose-code:rounded-md prose-code:bg-white/[0.06] prose-code:px-1.5 prose-code:py-0.5 prose-code:text-[0.86em] prose-code:text-[#eadfbd] prose-pre:my-4 prose-pre:rounded-2xl prose-pre:border prose-pre:border-white/10 prose-pre:bg-[#17181d] prose-pre:p-4 prose-pre:shadow-inner prose-hr:border-white/10';
+
+const AssistantMessage = memo(function AssistantMessage({ content }: { content: string }) {
+  return (
+    <div className={ASSISTANT_PROSE_CLASS}>
+      <Suspense fallback={<p className="whitespace-pre-wrap">{content}</p>}>
+        <ReactMarkdown>{content}</ReactMarkdown>
+      </Suspense>
+    </div>
+  );
+});
+
 interface ChatItem {
+  id: string;
   kind: 'message' | 'log' | 'plan' | 'permission';
   message?: Message;
   entry?: ActionLogEntry;
@@ -97,6 +114,8 @@ function App() {
   });
   const stopController = useRef<AbortController | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const scrollContainerRef = useRef<HTMLElement>(null);
+  const nextItemIdRef = useRef(0);
   const [pendingPlan, setPendingPlan] = useState<PendingPlan | null>(null);
   const [permissionMode, setPermissionMode] = useState<PermissionMode>('auto');
   const [permissionMenuOpen, setPermissionMenuOpen] = useState(false);
@@ -163,21 +182,23 @@ function App() {
   }, []);
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [items]);
+    const container = scrollContainerRef.current;
+    const end = messagesEndRef.current;
+    if (!container || !end) return;
+    const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+    if (distanceFromBottom < 240) {
+      end.scrollIntoView({ behavior: 'auto', block: 'end' });
+    }
+  }, [items.length]);
 
   useEffect(() => {
     setMenuIndex(0);
   }, [input]);
 
-  useEffect(() => {
-    const textarea = textareaRef.current;
-    if (!textarea) return;
-    textarea.style.height = 'auto';
-    textarea.style.height = `${Math.min(textarea.scrollHeight, window.innerHeight * 0.55)}px`;
-  }, [input]);
-
-  const append = (item: ChatItem) => setItems((previous) => [...previous, item]);
+  const append = (item: Omit<ChatItem, 'id'>) => {
+    const id = `chat-${nextItemIdRef.current++}`;
+    setItems((previous) => [...previous, { ...item, id }]);
+  };
 
   const menuOpen = shouldShowMenu(input);
   const filteredCommands = menuOpen ? filterCommands(input) : [];
@@ -443,11 +464,16 @@ function App() {
           type: 'GET_DOM_TREE',
         }),
       getCurrentUrl: () => getAgentTabUrl(tabId),
-      executeAction: (action) =>
-        sendToAgentTab(tabId, {
+      executeAction: async (action) => {
+        const def = registry.get(action.tool);
+        if (def?.runtime === 'background' && def.runInBackground) {
+          return def.runInBackground(action, { agentTabId: tabId });
+        }
+        return sendToAgentTab(tabId, {
           type: 'EXECUTE_ACTION',
           payload: actionToContentPayload(action),
-        }),
+        });
+      },
       navigate: (url) => navigateAgentTab(tabId, url),
       captureScreenshot: captureVisibleTab,
       includeScreenshots: config.sendScreenshots,
@@ -465,6 +491,7 @@ function App() {
         if (!origin) return 'ask';
         const session = sessionAllowsRef.current.get(origin);
         if (session?.has(action.tool)) return 'allow';
+        if (isHighRisk(action.tool)) return 'ask';
         const mode = actMode(allowlistRef.current, origin);
         if (mode === 'auto') return 'allow';
         if (mode === 'never') return 'deny';
@@ -612,7 +639,7 @@ function App() {
         </div>
       </header>
 
-      <main className="flex-1 overflow-y-auto px-4 py-2 space-y-3">
+      <main ref={scrollContainerRef} className="flex-1 overflow-y-auto px-4 py-2 space-y-3">
         {items.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center max-w-md mx-auto mt-[-60px]">
             <div className="w-[60px] h-[60px] bg-white rounded-[16px] flex items-center justify-center mb-5 shadow-sm p-1">
@@ -651,12 +678,12 @@ function App() {
             </div>
           </div>
         ) : (
-          items.map((item, index) => {
+          items.map((item) => {
             if (item.kind === 'message' && item.message) {
               const message = item.message;
               return (
                 <div
-                  key={index}
+                  key={item.id}
                   className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}
                 >
                   <div
@@ -669,9 +696,7 @@ function App() {
                     {message.role === 'user' ? (
                       <p className="whitespace-pre-wrap">{message.content}</p>
                     ) : (
-                      <div className="assistant-response prose prose-invert prose-sm max-w-none text-[15px] leading-7 prose-headings:mt-5 prose-headings:mb-2 prose-headings:text-gray-100 prose-headings:font-semibold prose-headings:tracking-[-0.01em] prose-h1:text-xl prose-h2:text-lg prose-h3:text-base prose-p:my-3 prose-p:text-gray-200 prose-a:text-[#d6c7a1] prose-a:no-underline hover:prose-a:text-[#eadfbd] prose-strong:text-gray-50 prose-strong:font-semibold prose-ul:my-3 prose-ol:my-3 prose-li:my-1.5 prose-li:pl-1 prose-li:marker:text-gray-500 prose-blockquote:my-4 prose-blockquote:border-l-[#d6c7a1]/70 prose-blockquote:bg-white/[0.03] prose-blockquote:rounded-r-xl prose-blockquote:py-1 prose-blockquote:pr-3 prose-code:rounded-md prose-code:bg-white/[0.06] prose-code:px-1.5 prose-code:py-0.5 prose-code:text-[0.86em] prose-code:text-[#eadfbd] prose-pre:my-4 prose-pre:rounded-2xl prose-pre:border prose-pre:border-white/10 prose-pre:bg-[#17181d] prose-pre:p-4 prose-pre:shadow-inner prose-hr:border-white/10">
-                        <ReactMarkdown>{message.content}</ReactMarkdown>
-                      </div>
+                      <AssistantMessage content={message.content} />
                     )}
                   </div>
                 </div>
@@ -679,13 +704,13 @@ function App() {
             }
 
             if (item.kind === 'log' && item.entry) {
-              return <ActionLogRow key={index} entry={item.entry} />;
+              return <ActionLogRow key={item.id} entry={item.entry} />;
             }
 
             if (item.kind === 'plan' && item.plan) {
               return (
                 <PlanCard
-                  key={index}
+                  key={item.id}
                   plan={item.plan}
                   modelLabel={config.model === 'claude-opus-4-7' ? 'Opus 4.7' : config.model}
                   onApprove={() => void approvePlan()}
@@ -698,7 +723,7 @@ function App() {
             if (item.kind === 'permission' && item.permission) {
               return (
                 <PermissionCard
-                  key={index}
+                  key={item.id}
                   request={item.permission}
                   onDecide={(decision) => resolvePermission(item.permission!.id, decision)}
                 />
@@ -833,7 +858,7 @@ function App() {
               }
             }}
             placeholder="Type / for commands"
-            className="w-full min-h-[24px] overflow-y-auto bg-transparent border-none resize-none text-[15px] leading-6 text-gray-200 placeholder-gray-500 focus:outline-none"
+            className="w-full min-h-[24px] max-h-[55vh] overflow-y-auto bg-transparent border-none resize-none text-[15px] leading-6 text-gray-200 placeholder-gray-500 focus:outline-none [field-sizing:content]"
             rows={1}
           />
           <div className="flex items-center justify-between mt-1">
@@ -913,55 +938,9 @@ function App() {
   );
 }
 
-function actionToContentPayload(action: AgentAction): {
-  action: string;
-  targetId?: number | string;
-  target?: string;
-  value?: string;
-  direction?: 'up' | 'down';
-  key?: string;
-  keys?: string[];
-  x?: number;
-  y?: number;
-  query?: string;
-  limit?: number;
-} {
-  switch (action.tool) {
-    case 'click':
-      return { action: 'click', targetId: action.targetId, target: action.target };
-    case 'type':
-      return { action: 'type', targetId: action.targetId, target: action.target, value: action.value };
-    case 'scroll':
-      return { action: 'scroll', direction: action.direction };
-    case 'navigate':
-      return { action: 'navigate', value: action.url };
-    case 'get_console_errors':
-      return { action: 'get_console_errors' };
-    case 'get_network_failures':
-      return { action: 'get_network_failures' };
-    case 'observe':
-      return { action: 'observe' };
-    case 'remember':
-      return { action: 'remember', key: action.key, value: action.value };
-    case 'recall':
-      return { action: 'recall', key: action.key };
-    case 'read_page':
-      return { action: 'read_page' };
-    case 'find_in_page':
-      return { action: 'find_in_page', query: action.query, limit: action.limit };
-    case 'click_at':
-      return { action: 'click_at', x: action.x, y: action.y };
-    case 'press_key':
-      return { action: 'press_key', key: action.key };
-    case 'hotkey':
-      return { action: 'hotkey', keys: action.keys };
-    case 'type_text':
-      return { action: 'type_text', value: action.value };
-    case 'screenshot':
-    case 'wait':
-    case 'finish':
-      return { action: action.tool };
-  }
+function actionToContentPayload(action: AgentAction): Record<string, unknown> {
+  const def = registry.get(action.tool);
+  return def?.toContentPayload?.(action) ?? { action: action.tool };
 }
 
 export default App;

@@ -715,6 +715,165 @@ function findInPage(query: string, limit = 5): FindHit[] {
   return hits;
 }
 
+function actionTimeout(value: unknown): number {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 5000;
+  return Math.min(30000, Math.max(100, Math.round(n)));
+}
+
+function waitForSelector(selector: string, timeoutMs: number): Promise<HTMLElement> {
+  return new Promise((resolve, reject) => {
+    const existing = selector ? document.querySelector(selector) : null;
+    if (existing instanceof HTMLElement && isVisible(existing)) {
+      resolve(existing);
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      observer.disconnect();
+      reject(new Error(`Timed out waiting for selector: ${selector}`));
+    }, timeoutMs);
+
+    const observer = new MutationObserver(() => {
+      const el = selector ? document.querySelector(selector) : null;
+      if (el instanceof HTMLElement && isVisible(el)) {
+        window.clearTimeout(timeout);
+        observer.disconnect();
+        resolve(el);
+      }
+    });
+
+    observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true });
+  });
+}
+
+function urlMatchesPattern(url: string, pattern: string): boolean {
+  if (!pattern) return false;
+  if (url.includes(pattern)) return true;
+  try {
+    return new RegExp(pattern).test(url);
+  } catch {
+    const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+    return new RegExp(`^${escaped}$`).test(url);
+  }
+}
+
+function waitForUrl(pattern: string, timeoutMs: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const check = () => {
+      if (urlMatchesPattern(window.location.href, pattern)) {
+        cleanup();
+        resolve(window.location.href);
+      }
+    };
+    const cleanup = () => {
+      window.clearTimeout(timeout);
+      window.clearInterval(interval);
+      window.removeEventListener('popstate', check);
+      window.removeEventListener('hashchange', check);
+    };
+    const timeout = window.setTimeout(() => {
+      cleanup();
+      reject(new Error(`Timed out waiting for URL: ${pattern}`));
+    }, timeoutMs);
+    const interval = window.setInterval(check, 250);
+    window.addEventListener('popstate', check);
+    window.addEventListener('hashchange', check);
+    check();
+  });
+}
+
+function cellText(cell: Element): string {
+  return (cell.textContent ?? '').trim().replace(/\s+/g, ' ');
+}
+
+function extractTable(selector?: string): { headers: string[]; rows: Record<string, string>[] } {
+  const table = selector
+    ? document.querySelector(selector)
+    : Array.from(document.querySelectorAll('table')).find(isVisible);
+  if (!(table instanceof HTMLTableElement)) throw new Error(selector ? `Table not found: ${selector}` : 'No visible table found');
+
+  const trs = Array.from(table.querySelectorAll('tr'));
+  if (trs.length === 0) return { headers: [], rows: [] };
+
+  const firstCells = Array.from(trs[0].querySelectorAll('th,td'));
+  const hasHeader = firstCells.some((cell) => cell.tagName.toLowerCase() === 'th');
+  const headers = firstCells.map((cell, index) => cellText(cell) || `column_${index + 1}`);
+  const dataRows = hasHeader ? trs.slice(1) : trs;
+  const resolvedHeaders = headers.length > 0 ? headers : ['column_1'];
+
+  return {
+    headers: resolvedHeaders,
+    rows: dataRows.map((tr) => {
+      const cells = Array.from(tr.querySelectorAll('th,td'));
+      const row: Record<string, string> = {};
+      cells.forEach((cell, index) => {
+        row[resolvedHeaders[index] ?? `column_${index + 1}`] = cellText(cell);
+      });
+      return row;
+    }),
+  };
+}
+
+interface FormFieldPayload {
+  selector: string;
+  value: string;
+}
+
+function setFieldValue(el: Element, value: string): boolean {
+  if (el instanceof HTMLInputElement) {
+    focusElement(el);
+    if (el.type === 'checkbox' || el.type === 'radio') {
+      el.checked = ['true', '1', 'yes', 'on', el.value].includes(value.toLowerCase());
+    } else {
+      el.value = value;
+    }
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    return true;
+  }
+  if (el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) {
+    focusElement(el);
+    el.value = value;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    return true;
+  }
+  if (el instanceof HTMLElement && (el.isContentEditable || el.getAttribute('contenteditable') === 'true')) {
+    focusElement(el);
+    el.textContent = value;
+    el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
+    return true;
+  }
+  return false;
+}
+
+function fillForm(fields: unknown): { filled: number; skipped: string[] } {
+  if (!Array.isArray(fields)) return { filled: 0, skipped: [] };
+  const skipped: string[] = [];
+  let filled = 0;
+
+  fields.forEach((item) => {
+    const field = item as Partial<FormFieldPayload>;
+    const selector = typeof field.selector === 'string' ? field.selector : '';
+    const value = typeof field.value === 'string' ? field.value : String(field.value ?? '');
+    let el: Element | null = null;
+    try {
+      el = selector ? document.querySelector(selector) : null;
+    } catch {
+      skipped.push(selector);
+      return;
+    }
+    if (!el || !setFieldValue(el, value)) {
+      skipped.push(selector);
+      return;
+    }
+    filled += 1;
+  });
+
+  return { filled, skipped };
+}
+
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.type === "GET_PAGE_CONTENT") {
     const clone = document.body.cloneNode(true) as HTMLElement;
@@ -830,6 +989,28 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           success: true,
           message: `Found ${hits.length} match(es) for ${JSON.stringify(queryString)}`,
           data: { hits },
+        });
+      } else if (action === 'wait_for_selector') {
+        waitForSelector(String(request.payload.selector ?? ''), actionTimeout(request.payload.timeoutMs))
+          .then((found) => sendResponse({ success: true, message: `Found ${cssPath(found)}` }))
+          .catch((e: unknown) => sendResponse({ success: false, error: e instanceof Error ? e.message : String(e) }));
+      } else if (action === 'wait_for_url') {
+        waitForUrl(String(request.payload.pattern ?? ''), actionTimeout(request.payload.timeoutMs))
+          .then((url) => sendResponse({ success: true, message: `URL matched ${url}` }))
+          .catch((e: unknown) => sendResponse({ success: false, error: e instanceof Error ? e.message : String(e) }));
+      } else if (action === 'extract_table') {
+        const table = extractTable(typeof request.payload.selector === 'string' ? request.payload.selector : undefined);
+        sendResponse({
+          success: true,
+          message: `Extracted ${table.rows.length} row(s)`,
+          data: table,
+        });
+      } else if (action === 'fill_form') {
+        const result = fillForm(request.payload.fields);
+        sendResponse({
+          success: result.filled > 0 || result.skipped.length === 0,
+          message: `Filled ${result.filled} field(s)`,
+          data: result,
         });
       } else {
         sendResponse({ success: false, error: `Unknown action: ${action}` });

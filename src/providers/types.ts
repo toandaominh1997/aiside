@@ -9,6 +9,11 @@ export interface Plan {
   sites: string[];
 }
 
+export interface FillFormField {
+  selector: string;
+  value: string;
+}
+
 export type AgentAction =
   | { tool: 'click'; targetId?: number | string; target?: string; rationale: string }
   | { tool: 'type'; targetId?: number | string; target?: string; value: string; rationale: string }
@@ -27,7 +32,15 @@ export type AgentAction =
   | { tool: 'find_in_page'; query: string; limit?: number; rationale: string }
   | { tool: 'remember'; key: string; value: string; rationale: string }
   | { tool: 'recall'; key?: string; rationale: string }
-  | { tool: 'finish'; summary: string };
+  | { tool: 'finish'; summary: string }
+  | { tool: 'tabs_list'; rationale: string }
+  | { tool: 'tabs_open'; url: string; active?: boolean; rationale: string }
+  | { tool: 'tabs_switch'; tabId: number; rationale: string }
+  | { tool: 'fetch_url'; url: string; method?: 'GET' | 'POST'; body?: string; rationale: string }
+  | { tool: 'wait_for_selector'; selector: string; timeoutMs?: number; rationale: string }
+  | { tool: 'wait_for_url'; pattern: string; timeoutMs?: number; rationale: string }
+  | { tool: 'extract_table'; selector?: string; rationale: string }
+  | { tool: 'fill_form'; fields: FillFormField[]; rationale: string };
 
 export interface ProviderConfig {
   provider: 'anthropic' | 'openai';

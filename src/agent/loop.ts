@@ -1,4 +1,5 @@
 import type { AgentAction, Message, Plan, Provider } from '../providers/types';
+import { registry } from './tools';
 
 export interface ActionLogEntry {
   id: string;
@@ -14,18 +15,12 @@ export interface ActionLogEntry {
 export type PermissionMode = 'read-only' | 'ask' | 'auto';
 export type PermissionVerdict = 'allow' | 'deny' | 'ask';
 
-const DESTRUCTIVE_TOOLS: ReadonlySet<AgentAction['tool']> = new Set([
-  'click',
-  'type',
-  'click_at',
-  'press_key',
-  'hotkey',
-  'type_text',
-  'navigate',
-]);
-
 export function isDestructive(tool: AgentAction['tool']): boolean {
-  return DESTRUCTIVE_TOOLS.has(tool);
+  return registry.get(tool)?.risk === 'destructive';
+}
+
+export function isHighRisk(tool: AgentAction['tool']): boolean {
+  return registry.get(tool)?.risk === 'high-risk';
 }
 
 export interface LoopDeps {
@@ -95,7 +90,10 @@ export async function runPlan(
 
     history.push({ role: 'assistant', content: `ACTION: ${describeAction(action)}` });
 
-    if (deps.permissionMode === 'read-only' && isDestructive(action.tool)) {
+    if (
+      deps.permissionMode === 'read-only' &&
+      (isDestructive(action.tool) || isHighRisk(action.tool))
+    ) {
       const reason = `Read-only mode blocked tool ${action.tool}`;
       deps.onLog(makeLogEntry(action, false, reason, 0));
       history.push({
@@ -105,7 +103,11 @@ export async function runPlan(
       continue;
     }
 
-    if (deps.permissionMode === 'ask' && isDestructive(action.tool)) {
+    const needsApproval =
+      isHighRisk(action.tool) ||
+      (deps.permissionMode === 'ask' && isDestructive(action.tool));
+
+    if (needsApproval) {
       const origin = safeOrigin(lastUrl) ?? '';
       const verdict = deps.checkPermission?.(origin, action) ?? 'ask';
       if (verdict === 'deny') {
@@ -229,55 +231,9 @@ function annotateDom(
 }
 
 function describeAction(action: AgentAction): string {
-  switch (action.tool) {
-    case 'click':
-      return JSON.stringify({ tool: 'click', targetId: action.targetId, target: action.target, rationale: action.rationale });
-    case 'type':
-      return JSON.stringify({
-        tool: 'type',
-        targetId: action.targetId,
-        target: action.target,
-        value: action.value,
-        rationale: action.rationale,
-      });
-    case 'scroll':
-      return JSON.stringify({ tool: 'scroll', direction: action.direction, rationale: action.rationale });
-    case 'navigate':
-      return JSON.stringify({ tool: 'navigate', url: action.url, rationale: action.rationale });
-    case 'screenshot':
-      return JSON.stringify({ tool: 'screenshot', rationale: action.rationale });
-    case 'get_console_errors':
-      return JSON.stringify({ tool: 'get_console_errors', rationale: action.rationale });
-    case 'get_network_failures':
-      return JSON.stringify({ tool: 'get_network_failures', rationale: action.rationale });
-    case 'wait':
-      return JSON.stringify({ tool: 'wait', ms: action.ms, rationale: action.rationale });
-    case 'observe':
-      return JSON.stringify({ tool: 'observe', rationale: action.rationale });
-    case 'read_page':
-      return JSON.stringify({ tool: 'read_page', rationale: action.rationale });
-    case 'find_in_page':
-      return JSON.stringify({
-        tool: 'find_in_page',
-        query: action.query,
-        limit: action.limit,
-        rationale: action.rationale,
-      });
-    case 'remember':
-      return JSON.stringify({ tool: 'remember', key: action.key, value: action.value, rationale: action.rationale });
-    case 'recall':
-      return JSON.stringify({ tool: 'recall', key: action.key, rationale: action.rationale });
-    case 'click_at':
-      return JSON.stringify({ tool: 'click_at', x: action.x, y: action.y, rationale: action.rationale });
-    case 'press_key':
-      return JSON.stringify({ tool: 'press_key', key: action.key, rationale: action.rationale });
-    case 'hotkey':
-      return JSON.stringify({ tool: 'hotkey', keys: action.keys, rationale: action.rationale });
-    case 'type_text':
-      return JSON.stringify({ tool: 'type_text', value: action.value, rationale: action.rationale });
-    case 'finish':
-      return JSON.stringify({ tool: 'finish', summary: action.summary });
-  }
+  const def = registry.get(action.tool);
+  if (!def) throw new Error(`Unknown tool: ${action.tool}`);
+  return JSON.stringify(def.describe(action));
 }
 
 function makeLogEntry(

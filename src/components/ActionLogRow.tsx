@@ -1,11 +1,12 @@
-import { useState } from 'react';
+import { memo, useState } from 'react';
 import type { ActionLogEntry } from '../agent/loop';
+import { registry } from '../agent/tools';
 
 interface Props {
   entry: ActionLogEntry;
 }
 
-export function ActionLogRow({ entry }: Props) {
+export const ActionLogRow = memo(function ActionLogRow({ entry }: Props) {
   const [open, setOpen] = useState(false);
   const icon = entry.ok ? 'OK' : 'ERR';
   const color = entry.ok ? 'text-green-400' : 'text-red-400';
@@ -42,47 +43,9 @@ export function ActionLogRow({ entry }: Props) {
       )}
     </div>
   );
-}
+});
 
 function summarize(entry: ActionLogEntry): string {
-  switch (entry.tool) {
-    case 'click':
-      return entry.args.target ? String(entry.args.target) : `id=${entry.args.targetId}`;
-    case 'type': {
-      const target = entry.args.target ? String(entry.args.target) : `id=${entry.args.targetId}`;
-      return `${target} "${entry.args.value}"`;
-    }
-    case 'navigate':
-      return String(entry.args.url);
-    case 'scroll':
-      return String(entry.args.direction);
-    case 'screenshot':
-      return 'capture visible tab';
-    case 'get_console_errors':
-      return 'console errors';
-    case 'get_network_failures':
-      return 'network/resource failures';
-    case 'wait':
-      return `${entry.args.ms}ms`;
-    case 'observe':
-      return 'page snapshot';
-    case 'remember':
-      return String(entry.args.key);
-    case 'recall':
-      return entry.args.key ? String(entry.args.key) : 'all memory';
-    case 'click_at':
-      return `(${entry.args.x}, ${entry.args.y})`;
-    case 'press_key':
-      return String(entry.args.key);
-    case 'hotkey':
-      return Array.isArray(entry.args.keys) ? (entry.args.keys as string[]).join('+') : '';
-    case 'type_text':
-      return `"${entry.args.value}"`;
-    case 'read_page':
-      return 'read article';
-    case 'find_in_page':
-      return `"${entry.args.query}"`;
-    case 'finish':
-      return entry.message;
-  }
+  const def = registry.get(entry.tool);
+  return def?.summarize({ args: entry.args, message: entry.message }) ?? entry.message;
 }
